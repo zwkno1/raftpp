@@ -1,0 +1,40 @@
+---
+# This configuration requires clang-format version 6.0 exactly.
+BasedOnStyle: Mozilla
+IndentWidth: 4
+IndentAccessModifiers: false 
+AccessModifierOffset: -4
+IndentCaseLabels: false
+FixNamespaceComments: true
+#AlignArrayOfStructures: Left
+#AlignConsecutiveAssignments: true
+AlignOperands: false
+AllowShortFunctionsOnASingleLine: InlineOnly
+AlwaysBreakAfterDefinitionReturnType: None
+AlwaysBreakAfterReturnType: None
+BinPackArguments: true
+BinPackParameters: true
+BraceWrapping:
+  AfterClass:      true
+  AfterEnum:       true
+  AfterFunction:   true
+  AfterStruct:     true
+  AfterUnion:      true
+BreakBeforeBraces: Custom
+ColumnLimit: 120
+IndentPPDirectives: AfterHash
+SortUsingDeclarations: false
+SpaceAfterTemplateKeyword: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex:           '^<[^.]+\.hpp'
+    Priority:        5
+  - Regex:           '^<[^.]+\.pb.h'
+    Priority:        6
+  - Regex:           '^<[^.]+\.h'
+    Priority:        4
+  - Regex:           '^<'
+    Priority:        1
+  - Regex:           '.*'
+    Priority:        11
+...
