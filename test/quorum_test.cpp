@@ -9,9 +9,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <quorum/majority.h>
-#include <quorum/quorum.h>
-#include <utils.h>
+#include <raftpp/raftpp.h>
 
 using namespace raft;
 using namespace raft::quorum;
@@ -19,25 +17,25 @@ using namespace raft::quorum;
 std::mt19937 rng(std::random_device{}());
 
 // smallRandIdxMap returns a reasonably sized map of ids to commit indexes.
-std::map<uint64_t, Index> SmallRandIdxMap()
+std::map<NodeId, Index> SmallRandIdxMap()
 {
     // Hard-code a reasonably small size here (quick will hard-code 50, which
     // is not useful here).
     auto size = 10;
 
     auto n = rng() % size;
-    std::vector<uint64_t> ids;
+    std::vector<NodeId> ids;
     for (int i = 0; i < n * 2; i++) {
         ids.push_back(i);
     }
     std::shuffle(ids.begin(), ids.end(), rng);
 
-    std::vector<uint64_t> idx;
+    std::vector<NodeId> idx;
     for (int i = 0; i < n; i++) {
         idx.push_back(rand() % n);
     }
 
-    std::map<uint64_t, Index> m;
+    std::map<NodeId, Index> m;
 
     for (int i = 0; i < n; i++) {
         m[ids[i]] = idx[i];
@@ -52,9 +50,9 @@ Index AlternativeMajorityCommittedIndex(MajorityConfig& c, MapAckIndexer& l)
         return IndexMax;
     }
 
-    std::map<uint64_t, Index> idToIdx;
+    std::map<NodeId, Index> idToIdx;
     for (auto id : c.ids()) {
-        auto idx = l.ackedIndex(id);
+        auto idx = l(id);
         if (idx) {
             idToIdx[id] = *idx;
         }
@@ -87,7 +85,7 @@ Index AlternativeMajorityCommittedIndex(MajorityConfig& c, MapAckIndexer& l)
     return maxQuorumIdx;
 }
 
-std::string to_string(const std::map<uint64_t, Index>& m)
+std::string to_string(const std::map<NodeId, Index>& m)
 {
     std::stringstream os;
     os << "{";

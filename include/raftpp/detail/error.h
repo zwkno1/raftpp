@@ -8,7 +8,7 @@
 #include <spdlog/spdlog.h>
 namespace raft {
 
-enum ErrorCode
+enum ErrorCode : uint32_t
 {
     // ErrCompacted is returned by Storage.Entries/Compact when a requested
     // index is unavailable because it predates the last snapshot.
@@ -30,9 +30,6 @@ enum ErrorCode
     // ErrProposalDropped is returned when the proposal is ignored by some cases,
     // so that the proposer can be notified and fail fast.
     ErrProposalDropped,
-
-    // ErrStepLocalMsg is returned when try to step a local raft message
-    ErrStepLocalMsg,
 
     // ErrStepPeerNotFound is returned when try to step a response message
     // but there is no peer found in raft.trk for that node.
@@ -58,7 +55,7 @@ public:
         return Error{ fmt::format(fmt, std::forward<Args>(args)...) };
     }
 
-    const char * what() const noexcept { return what_.c_str(); }
+    const char* what() const noexcept { return what_.c_str(); }
 
 private:
     std::string what_;
@@ -76,6 +73,8 @@ template <typename T>
         throw reason;
     } else if constexpr (std::is_same_v<T, ErrorCode>) {
         throw Error::fmt("error code: {}", uint64_t{ reason });
+    } else if (std::is_convertible_v<T, std::string>) {
+        throw Error{ reason };
     } else {
         throw Error{ "unknown error" };
     }
@@ -84,7 +83,7 @@ template <typename T>
 template <typename... Args>
 [[noreturn]] inline void panic(fmt::format_string<Args...> fmt, Args&&... args)
 {
-    throw Error{ fmt::format(fmt, std::forward<Args>(args)...) };
+    throw Error::fmt(fmt, std::forward<Args>(args)...);
 }
 
 } // namespace raft

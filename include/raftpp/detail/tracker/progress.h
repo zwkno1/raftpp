@@ -1,19 +1,32 @@
 #pragma once
-#include <cstddef>
-#include <cstdint>
-#include <iostream>
+
 #include <map>
 #include <memory>
-#include <unordered_map>
 #include <utility>
-#include <vector>
 
-#include <tracker/inflights.h>
-#include <tracker/state.h>
-#include <utils.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/tracker/inflights.h>
+#include <raftpp/detail/utils.h>
 
 namespace raft {
 namespace tracker {
+
+enum StateType : uint32_t
+{
+    // StateProbe indicates a follower whose last index isn't known. Such a
+    // follower is "probed" (i.e. an append sent periodically) to narrow down
+    // its last index. In the ideal (and common) case, only one round of probing
+    // is necessary as the follower will react with a hint. Followers that are
+    // probed over extended periods of time are often offline.
+    StateProbe = 0,
+    // StateReplicate is the state steady in which a follower eagerly receives
+    // log entries to append to its log.
+    StateReplicate,
+    // StateSnapshot indicates a follower that needs log entries not available
+    // from the leader's Raft log. Such a follower needs a full snapshot to
+    // return to StateReplicate.
+    StateSnapshot,
+};
 
 // Progress represents a follower’s progress in the view of the leader. Leader
 // maintains progresses of all followers, and sends entries to the follower
@@ -31,8 +44,8 @@ public:
       , state_(StateProbe)
       , pendingSnapshot_(0)
       , recentActive_(recentActive)
-      , msgAppFlowPaused_(false)
-      , inflights_(std::make_shared<Inflights>(maxInflight, maxInflightBytes))
+      , paused_(false)
+      , inflights_(maxInflight, maxInflightBytes)
     {
     }
 
@@ -40,10 +53,10 @@ public:
     // PendingSnapshot, and Inflights.
     void resetState(StateType state)
     {
-        msgAppFlowPaused_ = false;
+        paused_ = false;
         pendingSnapshot_ = 0;
         state_ = state;
-        inflights_->reset();
+        inflights_.reset();
     }
 
     // BecomeProbe transitions into StateProbe. Next is reset to Match+1 or,
@@ -81,25 +94,26 @@ public:
     // UpdateOnEntriesSend updates the progress on the given number of consecutive
     // entries being sent in a MsgAppend, with the given total bytes size, appended at
     // and after the given log index.
-    void updateOnEntriesSend(size_t entries, size_t bytes, uint64_t nextIndex)
+    void sentEntries(size_t entries, size_t bytes, Index nextIndex)
     {
         switch (state_) {
         case StateReplicate:
             if (entries > 0) {
                 auto last = nextIndex + entries - 1;
-                optimisticUpdate(last);
-                inflights_->add(last, bytes);
+                // appends all the way up to and including index last are in-flight.
+                next_ = last + 1;
+                inflights_.add(last, bytes);
             }
             // If this message overflows the in-flights tracker, or it was already full,
             // consider this message being a probe, so that the flow is paused.
-            msgAppFlowPaused_ = inflights_->full();
+            paused_ = inflights_.full();
             break;
         case StateProbe:
             // TODO(pavelkalinnikov): this condition captures the previous behaviour,
             // but we should set MsgAppFlowPaused unconditionally for simplicity, because any
             // MsgAppend in StateProbe is a probe, not only non-empty ones.
             if (entries > 0) {
-                msgAppFlowPaused_ = true;
+                paused_ = true;
             }
             break;
         default:
@@ -107,24 +121,19 @@ public:
         }
     }
 
-    // MaybeUpdate is called when an MsgAppendResponse arrives from the follower, with the
+    // update is called when an MsgAppendResponse arrives from the follower, with the
     // index acked by it. The method returns false if the given n index comes from
     // an outdated message. Otherwise it updates the progress and returns true.
-    bool maybeUpdate(Index idx)
+    bool update(Index idx)
     {
         next_ = std::max(next_, idx + 1);
-        // bool updated = false;
         if (match_ < idx) {
             match_ = idx;
-            msgAppFlowPaused_ = false;
+            paused_ = false;
             return true;
         }
         return false;
     }
-
-    // OptimisticUpdate signals that appends all the way up to and including index n
-    // are in-flight. As a result, Next is increased to n+1.
-    void optimisticUpdate(Index idx) { next_ = idx + 1; }
 
     // MaybeDecrTo adjusts the Progress to the receipt of a MsgAppend rejection. The
     // arguments are the index of the append message rejected by the follower, and
@@ -145,9 +154,6 @@ public:
             if (rejected <= match_) {
                 return false;
             }
-            // Directly decrease next to match + 1.
-            //
-            // TODO(tbg): why not use matchHint if it's larger?
             next_ = match_ + 1;
             return true;
         }
@@ -158,8 +164,8 @@ public:
             return false;
         }
 
-        next_ = std::max(std::min(rejected, matchHint + 1), uint64_t(1));
-        msgAppFlowPaused_ = false;
+        next_ = std::max(std::min(rejected, matchHint + 1), Index{ 1 });
+        paused_ = false;
         return true;
     }
 
@@ -174,11 +180,11 @@ public:
         switch (state_) {
         case StateProbe:
         case StateReplicate:
-            return msgAppFlowPaused_;
+            return paused_;
         case StateSnapshot:
             return true;
         default:
-            std::unreachable();
+            panic("bad progress state");
         }
     }
 
@@ -190,17 +196,13 @@ public:
 
     inline bool recentActive() const { return recentActive_; }
 
-    inline Inflights& inflights() { return *inflights_; }
+    inline Inflights& inflights() { return inflights_; }
 
-    inline void setMsgAppFlowPaused(bool b) { msgAppFlowPaused_ = b; }
+    inline void pause() { paused_ = true; }
+
+    inline void resume() { paused_ = false; }
 
     inline void setRecentActive(bool b) { recentActive_ = b; }
-
-    Progress clone()
-    {
-        auto p = *this;
-        return p;
-    }
 
     void reset(Index match, Index next)
     {
@@ -210,8 +212,8 @@ public:
         state_ = StateProbe;
         pendingSnapshot_ = 0;
         recentActive_ = false;
-        msgAppFlowPaused_ = false;
-        inflights_->reset();
+        paused_ = false;
+        inflights_.reset();
     }
 
 private:
@@ -260,13 +262,13 @@ private:
     // This is always true on the leader.
     bool recentActive_;
 
-    // MsgAppFlowPaused is used when the MsgAppend flow to a node is throttled. This
+    // paused_ is used when the MsgAppend flow to a node is throttled. This
     // happens in StateProbe, or StateReplicate with saturated Inflights. In both
     // cases, we need to continue sending MsgAppend once in a while to guarantee
     // progress, but we only do so when MsgAppFlowPaused is false (it is reset on
     // receiving a heartbeat response), to not overflow the receiver. See
     // IsPaused().
-    bool msgAppFlowPaused_;
+    bool paused_;
 
     // Inflights is a sliding window for the inflight messages.
     // Each inflight message contains one or more log entries.
@@ -280,13 +282,26 @@ private:
     // When a leader receives a reply, the previous inflights should
     // be freed by calling inflights.FreeLE with the index of the last
     // received entry.
-    std::shared_ptr<Inflights> inflights_;
+    Inflights inflights_;
 };
 
 using ProgressPtr = std::shared_ptr<Progress>;
 
-// ProgressMap is a map of *Progress.
-using ProgressMap = std::map<uint64_t, ProgressPtr>;
+using ProgressMap = std::map<NodeId, ProgressPtr>;
 
 } // namespace tracker
 } // namespace raft
+
+template <>
+struct fmt::formatter<raft::tracker::StateType> : fmt::formatter<std::string_view>
+{
+    inline auto format(raft::tracker::StateType st, format_context& ctx) const
+    {
+        const static std::array<std::string, 3> names = {
+            "StateProbe",
+            "StateReplicate",
+            "StateSnapshot",
+        };
+        return fmt::format_to(ctx.out(), "{}", names[st]);
+    }
+};

@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <vector>
 
-#include <utils.h>
+#include <raftpp/detail/error.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/utils.h>
 
 namespace raft {
 namespace tracker {
@@ -14,17 +16,17 @@ namespace tracker {
 // they are sending a new append, and release "quota" via FreeLE() whenever an
 // ack is received.
 
-// inflight describes an in-flight MsgAppend message.
-struct Inflight
-{
-    Index index;  // the index of the last entry inside the message
-    size_t bytes; // the total byte size of the entries in the message
-
-    auto operator<=>(const Inflight&) const = default;
-};
-
 class Inflights
 {
+    // inflight describes an in-flight MsgAppend message.
+    struct Inflight
+    {
+        Index index;  // the index of the last entry inside the message
+        size_t bytes; // the total byte size of the entries in the message
+
+        auto operator<=>(const Inflight&) const = default;
+    };
+
 public:
     // NewInflights sets up an Inflights that allows up to size inflight messages,
     // with the total byte size up to maxBytes. If maxBytes is 0 then there is no

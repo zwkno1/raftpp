@@ -2,18 +2,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <string>
-#include <unordered_map>
-#include <vector>
+#include <unordered_set>
 
-#include <utils.h>
-
-#include <raftpb/raft.pb.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/utils.h>
 
 namespace raft {
 
-enum ReadIndexOption : uint32_t
+enum ReadOnlyOption : uint32_t
 {
     // ReadOnlySafe guarantees the linearizability of the read only request by
     // communicating with the quorum. It is the default and suggested option.
@@ -33,25 +32,25 @@ enum ReadIndexOption : uint32_t
 // RequestCtx
 struct ReadState
 {
-    uint64_t index;
+    Index index;
     std::string context;
 };
 
 struct ReadIndexStatus
 {
-    pb::Message req;
+    ReadIndexRequest req;
     Index index;
     // NB: this never records 'false', but it's more convenient to use this
     // instead of a map[uint64]struct{} due to the API of quorum.VoteResult. If
     // this becomes performance sensitive enough (doubtful), quorum.VoteResult
     // can change to an API that is closer to that of CommittedIndex.
-    std::unordered_map<uint64_t, bool> acks;
+    std::unordered_set<NodeId> acks;
 };
 
-struct ReadIndexContext
+struct ReadOnly
 {
 public:
-    ReadIndexContext(ReadIndexOption opt)
+    ReadOnly(ReadOnlyOption opt)
       : option_(opt)
     {
     }
@@ -60,9 +59,9 @@ public:
     // `index` is the commit index of the raft state machine when it received
     // the read only request.
     // `m` is the original read only request message from the local or remote node.
-    inline void addRequest(Index index, const pb::Message& m)
+    inline void addRequest(Index index, const ReadIndexRequest& m)
     {
-        auto& s = m.entries(0).data();
+        auto& s = m.context;
         if (readIndexStatus_.contains(s)) {
             return;
         }
@@ -73,15 +72,15 @@ public:
     // recvAck notifies the readonly struct that the raft state machine received
     // an acknowledgment of the heartbeat that attached with the read only request
     // context.
-    const std::unordered_map<Index, bool>& recvAck(uint64_t id, const std::string& context)
+    const std::unordered_set<Index>& recvAck(NodeId id, const std::string& context)
     {
         auto iter = readIndexStatus_.find(context);
 
         if (iter == readIndexStatus_.end()) {
-            const static std::unordered_map<Index, bool> empty;
+            const static std::unordered_set<Index> empty;
             return empty;
         }
-        iter->second.acks[id] = true;
+        iter->second.acks.insert(id);
 
         return iter->second.acks;
     }
@@ -106,9 +105,8 @@ public:
             auto it = readIndexStatus_.find(ctx);
             rss.emplace_back(std::move(it->second));
             readIndexStatus_.erase(it);
+            readIndexQueue_.pop_front();
         }
-
-        readIndexQueue_.erase(readIndexQueue_.begin(), iter);
 
         return rss;
     }
@@ -124,7 +122,7 @@ public:
         return readIndexQueue_.back();
     }
 
-    inline ReadIndexOption option() const { return option_; }
+    inline ReadOnlyOption option() const { return option_; }
 
     inline void reset()
     {
@@ -133,9 +131,9 @@ public:
     }
 
 private:
-    ReadIndexOption option_;
+    ReadOnlyOption option_;
     std::unordered_map<std::string, ReadIndexStatus> readIndexStatus_;
-    std::vector<std::string> readIndexQueue_;
+    std::deque<std::string> readIndexQueue_;
 };
 
 } // namespace raft

@@ -9,29 +9,24 @@
 #include <utility>
 #include <vector>
 
-#include <error.h>
-#include <quorum/majority.h>
-#include <result.h>
-#include <tracker/inflights.h>
-#include <tracker/progress.h>
-#include <tracker/tracker.h>
-
-#include <raftpb/raft.pb.h>
+#include <raftpp/detail/error.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/result.h>
+#include <raftpp/detail/tracker/tracker.h>
 
 namespace raft {
 
 namespace confchange {
 
-bool leaveJoint(const pb::ConfChange& cc)
+inline bool leaveJoint(const ConfChange& cc)
 {
-    return cc.changes().empty() && cc.context().empty() && (cc.transition() == pb::ConfChangeTransition::Auto);
+    return cc.changes.empty() && cc.context.empty() && (cc.transition == ConfChangeTransition::Auto);
 }
 
-std::pair<bool, bool> enterJoint(const pb::ConfChange& cc)
+std::pair<bool, bool> enterJoint(const ConfChange& cc)
 {
-    if ((cc.transition() != pb::ConfChangeTransition::Auto) || (cc.changes().size() > 1)) {
-        if ((cc.transition() != pb::ConfChangeTransition::Auto) &&
-            (cc.transition() != pb::ConfChangeTransition::Implicit)) {
+    if ((cc.transition != ConfChangeTransition::Auto) || (cc.changes.size() > 1)) {
+        if ((cc.transition != ConfChangeTransition::Auto) && (cc.transition != ConfChangeTransition::Implicit)) {
             panic("unknown transition");
         }
         return { true, true };
@@ -51,10 +46,19 @@ struct ChangerResult
 // configuration.
 struct Changer
 {
-    std::function<tracker::ProgressPtr()> progressCreator_;
+    Changer(tracker::ProgressTracker& tracker, Index lastIndex)
+      : tracker_(tracker)
+      , lastIndex_(lastIndex)
+      , config_(tracker.config())
+      , prs_(tracker.progress())
+    {
+    }
 
-    tracker::ProgressMap prs_;
+    tracker::ProgressTracker& tracker_;
+    Index lastIndex_;
+
     tracker::Config config_;
+    tracker::ProgressMap prs_;
 
     // EnterJoint verifies that the outgoing (=right) majority config of the joint
     // config is empty and initializes it with a copy of the incoming (=left)
@@ -71,7 +75,7 @@ struct Changer
     // (Section 4.3) corresponds to `C_{new,old}`.
     //
     // [1]: https://github.com/ongardie/dissertation/blob/master/online-trim.pdf
-    Result<ChangerResult, Error> enterJoint(bool autoLeave, std::span<const pb::ConfChangeSingle> css)
+    Result<ChangerResult, Error> enterJoint(bool autoLeave, std::span<const ConfChangeItem> css)
     {
         auto res = checkAndCopy();
         if (res.has_error()) {
@@ -112,7 +116,7 @@ struct Changer
     // will return an error if that is not the case, if the resulting quorum is
     // zero, or if the configuration is in a joint state (i.e. if there is an
     // outgoing configuration).
-    Result<ChangerResult, Error> simple(std::span<const pb::ConfChangeSingle> ccs)
+    Result<ChangerResult, Error> simple(std::span<const ConfChangeItem> ccs)
     {
         auto res = checkAndCopy();
         if (res.has_error()) {
@@ -198,8 +202,8 @@ private:
     {
         struct
         {
-            using value_type = uint64_t;
-            inline void push_back(uint64_t) { ++n; }
+            using value_type = NodeId;
+            inline void push_back(NodeId) { ++n; }
             size_t n = 0;
         } counter;
         std::set_symmetric_difference(l.ids().begin(), l.ids().end(), r.ids().begin(), r.ids().end(),
@@ -216,11 +220,11 @@ private:
         auto cfg = config_.clone();
         tracker::ProgressMap prs = prs_;
 
-        auto res = checkInvariants(cfg, prs_);
+        auto res = checkInvariants(cfg, prs);
         if (res.has_error()) {
             return res.error();
         }
-        return ChangerResult{ cfg, prs_ };
+        return ChangerResult{ cfg, prs };
     }
 
     // checkInvariants makes sure that the config and progress are compatible with
@@ -289,29 +293,28 @@ private:
     // apply a change to the configuration. By convention, changes to voters are
     // always made to the incoming majority config Voters[0]. Voters[1] is either
     // empty or preserves the outgoing majority configuration while in a joint state.
-    Result<void, Error> apply(tracker::Config& cfg, tracker::ProgressMap& trk,
-                              std::span<const pb::ConfChangeSingle> ccs)
+    Result<void, Error> apply(tracker::Config& cfg, tracker::ProgressMap& trk, std::span<const ConfChangeItem> ccs)
     {
         for (auto& cc : ccs) {
-            if (cc.node_id() == 0) {
+            if (cc.nodeId == 0) {
                 // etcd replaces the NodeID with zero if it decides (downstream of
                 // raft) to not apply a change, so we have to have explicit code
                 // here to ignore these.
                 continue;
             }
 
-            switch (cc.type()) {
-            case pb::AddNode:
-                makeVoter(cfg, trk, cc.node_id());
+            switch (cc.type) {
+            case AddNode:
+                makeVoter(cfg, trk, cc.nodeId);
                 break;
-            case pb::AddLearnerNode:
-                makeLearner(cfg, trk, cc.node_id());
+            case AddLearnerNode:
+                makeLearner(cfg, trk, cc.nodeId);
                 break;
-            case pb::RemoveNode:
-                remove(cfg, trk, cc.node_id());
+            case RemoveNode:
+                remove(cfg, trk, cc.nodeId);
                 break;
             default:
-                return Error::fmt("unexpected conf type {}", pb::ConfChangeType_Name(cc.type()));
+                return Error::fmt("unexpected conf type"); //, ConfChangeType_Name(cc.type));
             }
         }
 
@@ -323,7 +326,7 @@ private:
 
     // makeVoter adds or promotes the given ID to be a voter in the incoming
     // majority config.
-    void makeVoter(tracker::Config& cfg, tracker::ProgressMap& trk, uint64_t id)
+    void makeVoter(tracker::Config& cfg, tracker::ProgressMap& trk, NodeId id)
     {
         auto p = initProgress(cfg, trk, id, false);
 
@@ -333,8 +336,7 @@ private:
     }
 
     // initProgress initializes a new progress for the given node or learner.
-    tracker::ProgressPtr initProgress(tracker::Config& cfg, tracker::ProgressMap& progresses, uint64_t id,
-                                      bool isLearner)
+    tracker::ProgressPtr initProgress(tracker::Config& cfg, tracker::ProgressMap& progresses, NodeId id, bool isLearner)
     {
         auto& p = progresses[id];
         if (p) {
@@ -359,7 +361,7 @@ private:
         // When a node is first added, we should mark it as recently active.
         // Otherwise, CheckQuorum may cause us to step down if it is invoked
         // before the added node has had a chance to communicate with us.
-        p = progressCreator_();
+        p = tracker_.create(lastIndex_, true);
         return p;
     }
 
@@ -376,7 +378,7 @@ private:
     // simultaneously. Instead, we add the learner to LearnersNext, so that it will
     // be added to Learners the moment the outgoing config is removed by
     // LeaveJoint().
-    void makeLearner(tracker::Config& cfg, tracker::ProgressMap& trk, uint64_t id)
+    void makeLearner(tracker::Config& cfg, tracker::ProgressMap& trk, NodeId id)
     {
 
         auto p = initProgress(cfg, trk, id, true);
@@ -403,7 +405,7 @@ private:
     }
 
     // remove this peer as a voter or learner from the incoming config.
-    void remove(tracker::Config& cfg, tracker::ProgressMap& trk, uint64_t id)
+    void remove(tracker::Config& cfg, tracker::ProgressMap& trk, NodeId id)
     {
         auto iter = trk.find(id);
         if (iter == trk.end()) {
@@ -421,7 +423,7 @@ private:
 
     // Describe prints the type and NodeID of the configuration changes as a
     // space-delimited string.
-    // std::string Describe(std::vector<pb::ConfChangeSingle>& css)
+    // std::string Describe(std::vector<ConfChangeSingle>& css)
     //{
     // var buf strings.Builder
     // for _, cc := range ccs {
@@ -438,8 +440,8 @@ private:
 // first the config that will become the outgoing one, and then the incoming one, and
 // b) another slice that, when applied to the config resulted from 1), represents the
 // ConfState.
-void toConfChangeSingle(const pb::ConfState& cs, std::vector<pb::ConfChangeSingle>& incoming,
-                        std::vector<pb::ConfChangeSingle>& outgoing)
+void toConfChangeSingle(const ConfState& cs, std::vector<ConfChangeItem>& incoming,
+                        std::vector<ConfChangeItem>& outgoing)
 {
     // Example to follow along this code:
     // voters=(1 2 3) learners=(5) outgoing=(1 2 4 6) learners_next=(4)
@@ -469,18 +471,18 @@ void toConfChangeSingle(const pb::ConfState& cs, std::vector<pb::ConfChangeSingl
     //
     // as desired.
 
-    auto add = [](std::vector<pb::ConfChangeSingle>& cc, auto& ids, pb::ConfChangeType type) {
+    auto add = [](std::vector<ConfChangeItem>& cc, auto& ids, ConfChangeType type) {
         for (auto id : ids) {
-            pb::ConfChangeSingle ccs;
-            ccs.set_type(type);
-            ccs.set_node_id(id);
+            ConfChangeItem ccs;
+            ccs.type = type;
+            ccs.nodeId = id;
             cc.push_back(ccs);
         }
     };
 
     // If there are outgoing voters, first add them one by one so that the
     // (non-joint) config has them all.
-    add(outgoing, cs.voters_outgoing(), pb::AddNode);
+    add(outgoing, cs.votersOutgoing, AddNode);
 
     // We're done constructing the outgoing slice, now on to the incoming one
     // (which will apply on top of the config created by the outgoing slice).
@@ -488,20 +490,20 @@ void toConfChangeSingle(const pb::ConfState& cs, std::vector<pb::ConfChangeSingl
     // First, we'll remove all of the outgoing voters.
     // If there are outgoing voters, first add them one by one so that the
     // (non-joint) config has them all.
-    add(incoming, cs.voters_outgoing(), pb::RemoveNode);
+    add(incoming, cs.votersOutgoing, RemoveNode);
 
     // Then we'll add the incoming voters and learners.
     // If there are outgoing voters, first add them one by one so that the
     // (non-joint) config has them all.
-    add(incoming, cs.voters(), pb::AddNode);
+    add(incoming, cs.voters, AddNode);
 
-    add(incoming, cs.learners(), pb::AddLearnerNode);
+    add(incoming, cs.learners, AddLearnerNode);
 
     // Same for LearnersNext; these are nodes we want to be learners but which
     // are currently voters in the outgoing config.
     // If there are outgoing voters, first add them one by one so that the
     // (non-joint) config has them all.
-    add(incoming, cs.learners_next(), pb::AddLearnerNode);
+    add(incoming, cs.learnersNext, AddLearnerNode);
 }
 
 // Restore takes a Changer (which must represent an empty configuration), and
@@ -512,23 +514,23 @@ void toConfChangeSingle(const pb::ConfState& cs, std::vector<pb::ConfChangeSingl
 // the Changer only needs a ProgressMap (not a whole Tracker) at which point
 // this can just take LastIndex and MaxInflight directly instead and cook up
 // the results from that alone.
-Result<ChangerResult, Error> restore(const pb::ConfState& cs, std::function<tracker::ProgressPtr()> progressCreator)
+Result<ChangerResult, Error> restore(const ConfState& cs, tracker::ProgressTracker& tracker, Index lastIndex)
 {
-    std::vector<pb::ConfChangeSingle> incoming, outgoing;
+    std::vector<ConfChangeItem> incoming, outgoing;
     toConfChangeSingle(cs, incoming, outgoing);
 
-    Changer chg{ std::move(progressCreator) };
+    Changer chg{ tracker, lastIndex };
 
     if (outgoing.empty()) {
         // No outgoing config, so just apply the incoming changes one by one.
         for (auto& cs : incoming) {
-            std::span<pb::ConfChangeSingle> s{ &cs, 1 };
+            std::span<ConfChangeItem> s{ &cs, 1 };
             auto res = chg.simple(s);
             if (res.has_error()) {
                 return res.error();
             }
-            chg.config_ = res->config_;
-            chg.prs_ = res->progress_;
+            chg.config_ = std::move(res->config_);
+            chg.prs_ = std::move(res->progress_);
         }
     } else {
         // The ConfState describes a joint configuration.
@@ -537,13 +539,13 @@ Result<ChangerResult, Error> restore(const pb::ConfState& cs, std::function<trac
         // that it temporarily becomes the incoming active config. For example,
         // if the config is (1 2 3)&(2 3 4), this will establish (2 3 4)&().
         for (auto& cs : outgoing) {
-            std::span<pb::ConfChangeSingle> s{ &cs, 1 };
+            std::span<ConfChangeItem> s{ &cs, 1 };
             auto res = chg.simple(s);
             if (res.has_error()) {
                 return res.error();
             }
-            chg.config_ = res->config_;
-            chg.prs_ = res->progress_;
+            chg.config_ = std::move(res->config_);
+            chg.prs_ = std::move(res->progress_);
         }
 
         // Now enter the joint state, which rotates the above additions into the
@@ -551,12 +553,12 @@ Result<ChangerResult, Error> restore(const pb::ConfState& cs, std::function<trac
         // example above, we'd get (1 2 3)&(2 3 4), i.e. the incoming operations
         // would be removing 2,3,4 and then adding in 1,2,3 while transitioning
         // into a joint state.
-        auto res = chg.enterJoint(cs.auto_leave(), incoming);
+        auto res = chg.enterJoint(cs.autoLeave, incoming);
         if (res.has_error()) {
             return res.error();
         }
-        chg.config_ = res->config_;
-        chg.prs_ = res->progress_;
+        chg.config_ = std::move(res->config_);
+        chg.prs_ = std::move(res->progress_);
     }
     return ChangerResult{ std::move(chg.config_), std::move(chg.prs_) };
 }

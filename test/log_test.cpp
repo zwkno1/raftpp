@@ -5,30 +5,26 @@
 #include <random>
 #include <vector>
 
-#include <confchange/confchange.h>
 #include <gtest/gtest.h>
-#include <log/unstable.h>
-#include <utils.h>
-
-#include <raftpb/raft.pb.h>
+#include <raftpp/raftpp.h>
 
 std::mt19937 rng(std::random_device{}());
 
 using namespace raft;
 
-raft::pb::Entry buildEntry(Index i, Term t)
+raft::Entry buildEntry(Index i, Term t)
 {
-    raft::pb::Entry entry;
-    entry.set_index(i);
-    entry.set_term(t);
+    raft::Entry entry;
+    entry.index = i;
+    entry.term = t;
     return entry;
 }
 
-std::shared_ptr<raft::pb::Snapshot> buildSnapshot(Index i, Term t)
+std::shared_ptr<raft::Snapshot> buildSnapshot(Index i, Term t)
 {
-    auto snap = std::make_shared<raft::pb::Snapshot>();
-    snap->mutable_metadata()->set_index(i);
-    snap->mutable_metadata()->set_term(t);
+    auto snap = std::make_shared<raft::Snapshot>();
+    snap->meta.index = i;
+    snap->meta.term = t;
     return snap;
 }
 
@@ -38,9 +34,9 @@ TEST(Unstable, FirstIndex)
 
     struct
     {
-        std::vector<raft::pb::Entry> entries;
-        uint64_t offset;
-        std::shared_ptr<raft::pb::Snapshot> snap;
+        std::vector<raft::Entry> entries;
+        Index offset;
+        std::shared_ptr<raft::Snapshot> snap;
         std::optional<Index> index;
     } tests[] = {
         // no snapshot
@@ -85,9 +81,9 @@ TEST(Unstable, LastIndex)
     auto snap = buildSnapshot(4, 1);
     struct
     {
-        std::vector<raft::pb::Entry> entries;
-        uint64_t offset;
-        std::shared_ptr<raft::pb::Snapshot> snap;
+        std::vector<raft::Entry> entries;
+        Index offset;
+        std::shared_ptr<raft::Snapshot> snap;
         std::optional<Index> index;
     } tests[] = {
         // last in entries
@@ -134,9 +130,9 @@ TEST(Unstable, Term)
     auto snap = buildSnapshot(4, 1);
     struct
     {
-        std::vector<raft::pb::Entry> entries;
-        uint64_t offset;
-        std::shared_ptr<raft::pb::Snapshot> snap;
+        std::vector<raft::Entry> entries;
+        Index offset;
+        std::shared_ptr<raft::Snapshot> snap;
         Index index;
         std::optional<Term> term;
     } tests[] = {
@@ -234,7 +230,7 @@ TEST(Unstable, Restore)
     auto s = buildSnapshot(6, 2);
     u.restore(s);
 
-    EXPECT_EQ(s->metadata().index() + 1, u.offset());
+    EXPECT_EQ(s->meta.index + 1, u.offset());
 }
 
 TEST(Unstable, stableEntries)
@@ -242,9 +238,9 @@ TEST(Unstable, stableEntries)
     auto snap = buildSnapshot(4, 1);
     struct
     {
-        std::vector<raft::pb::Entry> entries;
+        std::vector<raft::Entry> entries;
         Index offset;
-        std::shared_ptr<raft::pb::Snapshot> snap;
+        std::shared_ptr<raft::Snapshot> snap;
         Index index;
         Term term;
         Index woffset;
@@ -386,14 +382,14 @@ TEST(Unstable, AppendEntries)
     auto snap = buildSnapshot(4, 1);
     struct
     {
-        std::vector<raft::pb::Entry> entries;
+        std::vector<raft::Entry> entries;
         Index offset;
-        std::shared_ptr<raft::pb::Snapshot> snap;
-        std::vector<raft::pb::Entry> toappend;
+        std::shared_ptr<raft::Snapshot> snap;
+        std::vector<raft::Entry> toappend;
 
         Index woffset;
         Index woffsetInProgress;
-        std::vector<raft::pb::Entry> wentries;
+        std::vector<raft::Entry> wentries;
     } tests[] = {
         // append to the end
         {
@@ -486,16 +482,12 @@ TEST(Unstable, AppendEntries)
         raft::Unstable u;
         u.init(tt.offset, tt.entries);
         u.setSnapshot(tt.snap);
-        google::protobuf::RepeatedPtrField<raft::pb::Entry> toappend;
-        for (auto& i : tt.toappend) {
-            toappend.Add(std::move(i));
-        }
-        u.appendEntries(toappend);
+        u.appendEntries(tt.toappend);
         EXPECT_EQ(tt.woffset, u.offset());
         EXPECT_EQ(u.entries().size(), tt.wentries.size());
         for (size_t i = 0; i < u.entries().size(); ++i) {
-            EXPECT_EQ(u.entries()[i].index(), tt.wentries[i].index());
-            EXPECT_EQ(u.entries()[i].term(), tt.wentries[i].term());
+            EXPECT_EQ(u.entries()[i].index, tt.wentries[i].index);
+            EXPECT_EQ(u.entries()[i].term, tt.wentries[i].term);
         }
     }
 }

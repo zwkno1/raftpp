@@ -1,20 +1,22 @@
 #include <chrono>
-#include <iostream>
+#include <random>
 
+#include <_types/_uint64_t.h>
 #include <benchmark/benchmark.h>
-#include <quorum/majority.h>
-#include <quorum/quorum.h>
+#include <raftpp/raftpp.h>
 
 using namespace raft;
 using namespace raft::quorum;
 
-static void BenchmarkMajorityConfigCommittedIndex(benchmark::State& state)
+RandomGenerator<uint64_t> rng;
+
+void BenchmarkMajorityConfigCommittedIndex(benchmark::State& state)
 {
     MajorityConfig c;
     MapAckIndexer l;
-    for (uint64_t i = 0; i < state.range(0); i++) {
+    for (auto i = 0; i < state.range(0); i++) {
         c.add(i + 1);
-        l.add(i + 1, std::rand());
+        l.add(i + 1, rng());
     }
 
     for (auto _ : state) {

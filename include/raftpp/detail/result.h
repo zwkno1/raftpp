@@ -4,8 +4,8 @@
 #include <optional>
 #include <variant>
 
-#include <error.h>
-#include <utils.h>
+#include <raftpp/detail/error.h>
+#include <raftpp/detail/utils.h>
 namespace raft {
 
 template <typename T = void, typename Err = ErrorCode>
@@ -37,9 +37,11 @@ public:
 
     inline const Err& error() const { return std::get<Err>(value_); }
 
-    inline T& value() { return std::get<T>(value_); }
+    inline T& value() & { return std::get<T>(value_); }
 
-    inline const T& value() const { return std::get<T>(value_); }
+    inline const T& value() const& { return std::get<T>(value_); }
+
+    inline T&& value() && { return std::move(std::get<T>(value_)); }
 
     inline bool has_value() const { return std::holds_alternative<T>(value_); }
 
@@ -53,7 +55,7 @@ public:
         return v;
     }
 
-    T& unwrap()
+    inline T& unwrap() &
     {
         if (has_error()) {
             panic(error());
@@ -61,12 +63,21 @@ public:
         return value();
     }
 
-    const T& unwrap() const
+    inline const T& unwrap() const&
     {
         if (has_error()) {
             panic(error());
         }
         return value();
+    }
+
+    inline T&& unwrap() &&
+    {
+
+        if (has_error()) {
+            panic(error());
+        }
+        return std::move(value());
     }
 
 private:
@@ -130,11 +141,13 @@ public:
 
     inline bool has_error() const { return !has_value(); }
 
-    inline T& value() { return std::get<T>(value_); }
+    inline T& value() & { return std::get<T>(value_); }
 
-    inline const T& value() const { return std::get<T>(value_); }
+    inline const T& value() const& { return std::get<T>(value_); }
 
-    T& unwrap()
+    inline T&& value() && { return std::move(std::get<T>(value_)); }
+
+    T& unwrap() &
     {
         if (has_error()) {
             panic();
@@ -142,12 +155,20 @@ public:
         return value();
     }
 
-    const T& unwrap() const
+    const T& unwrap() const&
     {
         if (has_error()) {
             panic();
         }
         return value();
+    }
+
+    T&& unwrap() &&
+    {
+        if (has_error()) {
+            panic();
+        }
+        return std::move(value());
     }
 
     inline T value_or(T&& v)

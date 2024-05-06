@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -8,28 +9,27 @@
 #include <random>
 #include <ranges>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <typeinfo>
 #include <vector>
 
-#include <_types/_uint64_t.h>
-#include <confchange/confchange.h>
-#include <error.h>
-#include <log/log.h>
-#include <quorum/quorum.h>
-#include <readindex.h>
-#include <result.h>
-#include <storage.h>
-#include <tracker/progress.h>
-#include <tracker/tracker.h>
-#include <utils.h>
-
-#include <raftpb/raft.pb.h>
-
-#include "spdlog/logger.h"
+#include <raftpp/detail/confchange.h>
+#include <raftpp/detail/error.h>
+#include <raftpp/detail/log.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/quorum.h>
+#include <raftpp/detail/readonly.h>
+#include <raftpp/detail/result.h>
+#include <raftpp/detail/storage.h>
+#include <raftpp/detail/tracker/progress.h>
+#include <raftpp/detail/tracker/tracker.h>
+#include <raftpp/detail/utils.h>
 
 namespace raft {
 
 // Possible values for StateType.
-enum StateType : uint64_t
+enum StateType : uint32_t
 {
     Follower = 0,
     Candidate,
@@ -38,62 +38,23 @@ enum StateType : uint64_t
     NumStates,
 };
 
-inline const std::string& to_string(StateType s)
-{
-
-    static const std::array<std::string, 4> stamp = {
-        "Follower",
-        "Candidate",
-        "Leader",
-        "PreCandidate",
-    };
-    return stamp[s];
-}
-
-// CampaignType represents the type of campaigning
-// the reason we use the type of string instead of uint64_t
-// is because it's simpler to compare and fill in raft entries
-// type CampaignType string
-
-// Possible values for CampaignType
-
-enum CampaignType : uint8_t
-{
-    // campaignPreElection represents the first phase of a normal election when
-    // Config.PreVote is true.
-    CampaignPreElection = 0,
-    // campaignElection represents a normal (time-based) election (the second phase
-    // of the election when Config.PreVote is true).
-    CampaignElection,
-    // campaignTransfer represents the type of leader transfer
-    CampaignTransfer,
-    CampaignTypeInvalid,
-};
-
-inline CampaignType campaignTypeFromString(const std::string& str)
-{
-    if (str.size() != 1 || uint8_t(str[0]) > CampaignTypeInvalid) {
-        return CampaignTypeInvalid;
-    }
-    return CampaignType(str[0]);
-}
-
-constexpr uint64_t noLimit = std::numeric_limits<uint64_t>::max();
+constexpr size_t noLimit = std::numeric_limits<size_t>::max();
 
 // SoftState provides state that is useful for logging and debugging.
 // The state is volatile and does not need to be persisted to the WAL.
 struct SoftState
 {
-    uint64_t leaderId_; // must use atomic operations to access; keep 64-bit aligned.
+    NodeId lead_;
     StateType state_;
 
     auto operator<=>(const SoftState&) const = default;
 };
 
+using Logger = ::spdlog::logger;
 // Config contains the parameters to start a raft.
 struct Config
 {
-    Config(Logger & logger)
+    Config(Logger& logger)
       : logger_(logger)
       , id_(0)
       , electionTick_(50)
@@ -106,7 +67,7 @@ struct Config
       , maxInflightBytes_(10000000)
       , checkQuorum_(false)
       , preVote_(true)
-      , readIndexOption_(ReadIndexSafe)
+      , readOnlyOption_(ReadIndexSafe)
       , disableProposalForwarding_(false)
       , disableConfChangeValidation_(false)
       , stepDownOnRemoval_(false)
@@ -115,11 +76,10 @@ struct Config
 
     // Logger is the logger used for raft log. For multinode which can host
     // multiple raft group, each raft group can have its own logger
-    // Logger Logger
-    Logger & logger_;
+    Logger& logger_;
 
     // ID is the identity of the local raft. ID cannot be 0.
-    uint64_t id_;
+    NodeId id_;
 
     // ElectionTick is the number of Node.Tick invocations that must pass between
     // elections. That is, if a follower does not receive any message from the
@@ -142,7 +102,7 @@ struct Config
     // raft. raft will not return entries to the application smaller or equal to
     // Applied. If Applied is unset when restarting, raft might return previous
     // applied entries. This is a very application dependent configuration.
-    uint64_t applied_;
+    Index applied_;
 
     // AsyncStorageWrites configures the raft node to write to its local storage
     // (raft log and state machine) using a request/response message passing
@@ -185,7 +145,7 @@ struct Config
     // during normal operation). On the other side, it might affect the
     // throughput during normal replication. Note: math.Maxuint64_t for unlimited,
     // 0 for at most one entry per message.
-    uint64_t maxSizePerMsg_;
+    size_t maxSizePerMsg_;
     // MaxCommittedSizePerReady limits the size of the committed entries which
     // can be applying at the same time.
     //
@@ -201,7 +161,7 @@ struct Config
     // MaxInflightMsgs limits the max number of in-flight append messages during
     // optimistic replication phase. The application transportation layer usually
     // has its own sending buffer over TCP/UDP. Setting MaxInflightMsgs to avoid
-    // overflowing that sending buffer. TODO (xiangli): feedback to application to
+    // overflowing that sending buffer. TODO: feedback to application to
     // limit the proposal rate?
     size_t maxInflightMsgs_;
     // MaxInflightBytes limits the number of in-flight bytes in append messages.
@@ -235,7 +195,7 @@ struct Config
     // should (clock can move backward/pause without any bound). ReadIndex is not safe
     // in that case.
     // CheckQuorum MUST be enabled if ReadOnlyOption is ReadOnlyLeaseBased.
-    ReadIndexOption readIndexOption_;
+    ReadOnlyOption readOnlyOption_;
 
     // DisableProposalForwarding set to true means that followers will drop
     // proposals, rather than forwarding them to the leader. One use case for
@@ -309,7 +269,7 @@ struct Config
             return Error::fmt("max inflight bytes must be >= max message size");
         }
 
-        if (readIndexOption_ == ReadIndexLeaseBased && !checkQuorum_) {
+        if (readOnlyOption_ == ReadIndexLeaseBased && !checkQuorum_) {
             return Error::fmt("CheckQuorum must be enabled when ReadOnlyOption is ReadOnlyLeaseBased");
         }
 
@@ -333,7 +293,7 @@ public:
       : validator_(c)
       , logger_(c.logger_)
       , log_(storage, c.maxCommittedSizePerReady_)
-      , readOnly_(c.readIndexOption_)
+      , readOnly_(c.readOnlyOption_)
       , tracker_(c.maxInflightMsgs_, c.maxInflightBytes_)
       , id_(c.id_)
       , isLearner_(false)
@@ -348,14 +308,17 @@ public:
       , stepDownOnRemoval_(c.stepDownOnRemoval_)
       , electionElapsed_(0)
       , heartbeatElapsed_(0)
+      , rng_(c.electionTick_, c.electionTick_ * 2)
     {
         auto state = storage.initialState().unwrap();
-        auto changeResult = confchange::restore(state.conf_, progressCreator()).unwrap();
+        auto changeResult = confchange::restore(state.conf, tracker_, log_.lastIndex()).unwrap();
 
-        assertConfStatesEquivalent(state.conf_, switchToConfig(changeResult));
+        if (state.conf != switchToConfig(changeResult)) {
+            panic("mismatching confstate after restore");
+        }
 
-        if (!isEmptyHardState(state.hard_)) {
-            loadState(state.hard_);
+        if (!state.hard.empty()) {
+            loadState(state.hard);
         }
 
         if (c.applied_ > 0) {
@@ -365,338 +328,245 @@ public:
         becomeFollower(term_, InvalidId);
     }
 
-    uint64_t id() const { return id_; }
+    NodeId id() const { return id_; }
 
     StateType state() const { return state_; }
 
-    bool hasLeader() { return lead_ != InvalidId; }
+    bool hasLeader() const { return lead_ != InvalidId; }
 
-    SoftState softState() { return SoftState{ lead_, state_ }; }
+    SoftState softState() const { return SoftState{ lead_, state_ }; }
 
-    pb::HardState hardState()
+    HardState hardState() const
     {
-        pb::HardState s;
-        s.set_term(term_);
-        s.set_vote(vote_);
-        s.set_commit(log_.committed_);
-        return s;
+        return {
+            .term = term_,
+            .vote = vote_,
+            .commit = log_.committed_,
+        };
     }
 
-    // send schedules persisting state to a stable storage and AFTER that
-    // sending the message (as part of next Ready message processing).
-    void send(pb::Message m)
-    {
-        if (m.from() == 0) {
-            m.set_from(id_);
-        }
-
-        if (m.type() == pb::MsgRequestVote || m.type() == pb::MsgRequestVoteResponse ||
-            m.type() == pb::MsgRequestPreVote || m.type() == pb::MsgRequestPreVoteResponse) {
-            if (m.term() == 0) {
-                // All {pre-,}campaign messages need to have the term set when
-                // sending.
-                // - MsgRequestVote: m.term() is the term the node is campaigning for,
-                //   non-zero as we increment the term when campaigning.
-                // - MsgRequestVoteResponse: m.term() is the new term_ if the MsgRequestVote was
-                //   granted, non-zero for the same reason MsgRequestVote is
-                // - MsgRequestPreVote: m.term() is the term the node will campaign,
-                //   non-zero as we use m.term() to indicate the next term we'll be
-                //   campaigning for
-                // - MsgRequestPreVoteResponse: m.term() is the term received in the original
-                //   MsgRequestPreVote if the pre-vote was granted, non-zero for the
-                //   same reasons MsgRequestPreVote is
-                panic("term should be set when sending {}");
-            }
-        } else {
-            if (m.term() != 0) {
-                panic("term should not be set when sending {} (was {})");
-            }
-            // do not attach term to MsgPropose, MsgReadIndex
-            // proposals are a way to forward to the leader and
-            // should be treated as local message.
-            // MsgReadIndex is also forwarded to leader.
-            if (m.type() != pb::MsgPropose && m.type() != pb::MsgReadIndex) {
-                m.set_term(term_);
-            }
-        }
-
-        if (m.type() == pb::MsgAppendResponse || m.type() == pb::MsgRequestVoteResponse ||
-            m.type() == pb::MsgRequestPreVoteResponse) {
-            // If async storage writes are enabled, messages added to the msgs slice
-            // are allowed to be sent out before unstable state (e.g. log entry
-            // writes and election votes) have been durably synced to the local
-            // disk.
-            //
-            // For most message types, this is not an issue. However, response
-            // messages that relate to "voting" on either leader election or log
-            // appends require durability before they can be sent. It would be
-            // incorrect to publish a vote in an election before that vote has been
-            // synced to stable storage locally. Similarly, it would be incorrect to
-            // acknowledge a log append to the leader before that entry has been
-            // synced to stable storage locally.
-            //
-            // Per the Raft thesis, section 3.8 Persisted state and server restarts:
-            //
-            // > Raft servers must persist enough information to stable storage to
-            // > survive server restarts safely. In particular, each server persists
-            // > its current term and vote; this is necessary to prevent the server
-            // > from voting twice in the same term or replacing log entries from a
-            // > newer leader with those from a deposed leader. Each server also
-            // > persists new log entries before they are counted towards the entries’
-            // > commitment; this prevents committed entries from being lost or
-            // > “uncommitted” when servers restart
-            //
-            // To enforce this durability requirement, these response messages are
-            // queued to be sent out as soon as the current collection of unstable
-            // state (the state that the response message was predicated upon) has
-            // been durably persisted. This unstable state may have already been
-            // passed to a Ready struct whose persistence is in progress or may be
-            // waiting for the next Ready struct to begin being written to Storage.
-            // These messages must wait for all of this state to be durable before
-            // being published.
-            //
-            // Rejected responses (m.reject() == true) present an interesting case
-            // where the durability requirement is less unambiguous. A rejection may
-            // be predicated upon unstable state. For instance, a node may reject a
-            // vote for one peer because it has already begun syncing its vote for
-            // another peer. Or it may reject a vote from one peer because it has
-            // unstable log entries that indicate that the peer is behind on its
-            // log. In these cases, it is likely safe to send out the rejection
-            // response immediately without compromising safety in the presence of a
-            // server restart. However, because these rejections are rare and
-            // because the safety of such behavior has not been formally verified,
-            // we err on the side of safety and omit a `&& !m.reject()` condition
-            // above.
-            msgsAfterAppend_.push_back(std::move(m));
-        } else {
-            if (m.to() == id_) {
-                panic("message should not be self-addressed when sending");
-            }
-            msgs_.push_back(std::move(m));
-        }
-    }
-
-    std::function<tracker::ProgressPtr()> progressCreator() const
-    {
-        return [&, lastIndex = log_.lastIndex()]() { return tracker_.create(lastIndex, true); };
-    };
-
-    void tick()
-    {
-        // std::chrono::steady_clock::now().time_since_epoch().count();
-        switch (state_) {
-        case PreCandidate:
-        case Candidate:
-        case Follower:
-            return tickElection();
-        case Leader:
-            return tickHeartbeat();
-        default:
-            panic("bad state: {}", uint64_t{ state_ });
-        }
-    }
-
-    pb::ConfState applyConfChange(const pb::ConfChange& cc)
+    ConfState applyConfChange(const ConfChange& cc)
     {
         Result<confchange::ChangerResult, Error> result;
 
         auto changer = confchange::Changer{
-            progressCreator(),
-            tracker_.progress(),
-            tracker_.config(),
+            tracker_,
+            log_.lastIndex(),
         };
 
         if (confchange::leaveJoint(cc)) {
             result = changer.leaveJoint();
         } else if (auto [autoLeave, ok] = confchange::enterJoint(cc); ok) {
-            result = changer.enterJoint(autoLeave, { &cc.changes(0), size_t(cc.changes_size()) });
+            result = changer.enterJoint(autoLeave, cc.changes);
         } else {
-            result = changer.simple({ &cc.changes(0), size_t(cc.changes_size()) });
+            result = changer.simple(cc.changes);
         }
 
         return switchToConfig(result.unwrap());
     }
 
-    Result<> step(pb::Message& m)
+    Result<> propose(std::string data)
     {
-        // Handle the message term, which may result in our stepping down to a follower.
-        if (m.term() == 0) {
-            // local message
-        } else if (m.term() > term_) {
-            if (m.type() == pb::MsgRequestVote || m.type() == pb::MsgRequestPreVote) {
-                bool force = (campaignTypeFromString(m.context()) == CampaignTransfer);
+        return step(ProposalRequst{
+          .from = id_,
+          .entries = { Entry{
+            .type = EntryNormal,
+            .data = std::move(data),
+          } },
+        });
+    }
 
-                bool inLease = checkQuorum_ && lead_ != InvalidId && electionElapsed_ < electionTimeout_;
-                if (!force && inLease) {
-                    // If a server receives a RequestVote request within the minimum election timeout
-                    // of hearing from a current leader, it does not update its term or grant its vote
-                    // logger_.info("{} [logterm: {}, index: {}, vote: {}] ignored {} from {} [logterm: {}, index: {}]
-                    // at term {}: lease is not expired (remaining ticks: {})", 	id_, log_.lastTerm(),
-                    // log_.lastIndex(), vote_, m.type(), m.from(), m.logterm(), m.index(), term_,
-                    // electionTimeout_-electionElapsed_)
-                    return {};
+    Result<> proposeConfChange(const ConfChange& cc)
+    {
+        return step(ProposalRequst{
+          .from = id_,
+          .entries = { Entry{
+            .type = EntryConfChange,
+            .data = cc.serialize(),
+          } },
+        });
+    }
+
+    template <Message Msg>
+    Result<> step(Msg&& m)
+    {
+        // skip message dosen't have term
+        if constexpr (!one_of<Msg, ProposalRequst, ReadIndexRequest>) {
+            if (m.term < term_) {
+                if constexpr (one_of<Msg, AppendEntriesRequest, HeartbeatRequest>) {
+                    if (checkQuorum_ || preVote_) {
+                        // We have received messages from a leader at a lower term. It is possible
+                        // that these messages were simply delayed in the network, but this could
+                        // also mean that this node has advanced its term number during a network
+                        // partition, and it is now unable to either win an election or to rejoin
+                        // the majority on the old term. If checkQuorum is false, this will be
+                        // handled by incrementing term numbers in response to MsgRequestVote with a
+                        // higher term, but if checkQuorum is true we may not advance the term on
+                        // MsgRequestVote and must generate other messages to advance the term. The net
+                        // result of these two features is to minimize the disruption caused by
+                        // nodes that have been removed from the cluster's configuration: a
+                        // removed node will send MsgVotes (or MsgPreVotes) which will be ignored,
+                        // but it will not receive MsgAppend or MsgHeartbeat, so it will not create
+                        // disruptive term increases, by notifying leader of this node's activeness.
+                        // The above comments also true for Pre-Vote
+                        //
+                        // When follower gets isolated, it soon starts an election ending
+                        // up with a higher term than leader, although it won't receive enough
+                        // votes to win the election. When it regains connectivity, this response
+                        // with "MsgAppendResponse" of higher term would force leader to step down.
+                        // However, this disruption is inevitable to free this stuck node with
+                        // fresh election. This can be prevented with Pre-Vote phase.
+                        send(AppendEntriesResponse{
+                          .to = m.from,
+                          .reject = true,
+                        });
+                    }
+                } else if constexpr (one_of<Msg, VoteRequest>) {
+                    // Before Pre-Vote enable, there may have candidate with higher term,
+                    // but less log. After update to Pre-Vote, the cluster may deadlock if
+                    // we drop messages with a lower term.
+                    if (m.pre) {
+                        send(VoteResponse{
+                          .to = m.from,
+                          .pre = m.pre,
+                          .term = term_,
+                          .reject = true,
+                        });
+                    }
                 }
-            }
-
-            if (m.type() == pb::MsgRequestPreVote) {
-
-                // Never change our term in response to a PreVote
-            } else if (m.type() == pb::MsgRequestPreVoteResponse && !m.reject()) {
-                // We send pre-vote requests with a term in our future. If the
-                // pre-vote is granted, we will increment our term when we get a
-                // quorum. If it is not, the term comes from the node that
-                // rejected our vote so we should become a follower at the new
-                // term.
-            } else {
-                // logger_.info("{} [term: {}] received a {} message with higher term from {} [term: {}]",
-                //	id_, term_, m.type(), m.from(), m.term())
-                if (m.type() == pb::MsgAppend || m.type() == pb::MsgHeartbeat || m.type() == pb::MsgSnapshot) {
-                    becomeFollower(m.term(), m.from());
-                } else {
-                    becomeFollower(m.term(), InvalidId);
-                }
-            }
-        } else if (m.term() < term_) {
-            if ((checkQuorum_ || preVote_) && (m.type() == pb::MsgHeartbeat || m.type() == pb::MsgAppend)) {
-                // We have received messages from a leader at a lower term. It is possible
-                // that these messages were simply delayed in the network, but this could
-                // also mean that this node has advanced its term number during a network
-                // partition, and it is now unable to either win an election or to rejoin
-                // the majority on the old term. If checkQuorum is false, this will be
-                // handled by incrementing term numbers in response to MsgRequestVote with a
-                // higher term, but if checkQuorum is true we may not advance the term on
-                // MsgRequestVote and must generate other messages to advance the term. The net
-                // result of these two features is to minimize the disruption caused by
-                // nodes that have been removed from the cluster's configuration: a
-                // removed node will send MsgVotes (or MsgPreVotes) which will be ignored,
-                // but it will not receive MsgAppend or MsgHeartbeat, so it will not create
-                // disruptive term increases, by notifying leader of this node's activeness.
-                // The above comments also true for Pre-Vote
-                //
-                // When follower gets isolated, it soon starts an election ending
-                // up with a higher term than leader, although it won't receive enough
-                // votes to win the election. When it regains connectivity, this response
-                // with "pb::MsgAppendResponse" of higher term would force leader to step down.
-                // However, this disruption is inevitable to free this stuck node with
-                // fresh election. This can be prevented with Pre-Vote phase.
-                pb::Message msg;
-                msg.set_to(m.from());
-                msg.set_type(pb::MsgAppendResponse);
-                send(std::move(msg));
-                // send(pb::Message{ To : m.from(), Type : pb::MsgAppendResponse });
-            } else if (m.type() == pb::MsgRequestPreVote) {
-                // Before Pre-Vote enable, there may have candidate with higher term,
-                // but less log. After update to Pre-Vote, the cluster may deadlock if
-                // we drop messages with a lower term.
-                // logger_.info("{} [logterm: {}, index: {}, vote: {}] rejected {} from {} [logterm: {}, index: {}] at
-                // term {}", 	id_, log_.lastTerm(), log_.lastIndex(), vote_, m.type(), m.from(), m.logterm(),
-                // m.index(), term_)
-                pb::Message msg;
-                msg.set_to(m.from());
-                msg.set_type(pb::MsgRequestPreVoteResponse);
-                msg.set_reject(true);
-                send(std::move(msg));
-                // send(pb::Message{ To : m.from(), Term : term_, Type : pb::MsgRequestPreVoteResponse, Reject : true
-                // });
-            } else {
                 // ignore other cases
-                // logger_.info("{} [term: {}] ignored a {} message with lower term from {} [term: {}]",
-                //	id_, term_, m.type(), m.from(), m.term())
+                return {};
             }
-            return {};
+
+            // now message's term >= node's term_
+            if (m.term > term_) {
+                if constexpr (one_of<Msg, VoteRequest>) {
+                    bool force = (m.type == CampaignTransfer);
+                    bool inLease = checkQuorum_ && lead_ != InvalidId && electionElapsed_ < electionTimeout_;
+                    if (!force && inLease) {
+                        // If a server receives a RequestVote request within the minimum election timeout
+                        // of hearing from a current leader, it does not update its term or grant its vote
+                        return {};
+                    }
+
+                    // Never change our term in response to a PreVote
+                    if (!m.pre) {
+                        becomeFollower(m.term, InvalidId);
+                    }
+                } else if constexpr (one_of<Msg, HeartbeatRequest, AppendEntriesRequest, InstallSnapshotRequest>) {
+                    becomeFollower(m.term, m.from);
+                } else if constexpr (one_of<Msg, VoteResponse>) {
+                    // We send pre-vote requests with a term in our future. If the
+                    // pre-vote is granted, we will increment our term when we get a
+                    // quorum. If it is not, the term comes from the node that
+                    // rejected our vote so we should become a follower at the new
+                    // term.
+                    if (m.reject) {
+                        becomeFollower(m.term, InvalidId);
+                    }
+                } else {
+                    becomeFollower(m.term, InvalidId);
+                }
+            }
         }
 
-        switch (m.type()) {
-        case pb::MsgRequestVote:
-        case pb::MsgRequestPreVote: {
+        if constexpr (one_of<Msg, VoteRequest>) {
+
             // We can vote if this is a repeat of a vote we've already cast...
-            bool canVote = (vote_ == m.from() ||
+            bool granted = (vote_ == m.from ||
                             // ...we haven't voted and we don't think there's a leader yet in this term...
                             (vote_ == InvalidId && lead_ == InvalidId) ||
                             // ...or this is a PreVote for a future term...
-                            (m.type() == pb::MsgRequestPreVote && m.term() > term_));
-            // ...and we believe the candidate is up to date.
-            if (canVote && log_.isUpToDate(m.index(), m.logterm())) {
-                // Note: it turns out that that learners must be allowed to cast votes.
-                // This seems counter- intuitive but is necessary in the situation in which
-                // a learner has been promoted (i.e. is now a voter) but has not learned
-                // about this yet.
-                // For example, consider a group in which id=1 is a learner and id=2 and
-                // id=3 are voters. A configuration change promoting 1 can be committed on
-                // the quorum `{2,3}` without the config change being appended to the
-                // learner's log. If the leader (say 2) fails, there are de facto two
-                // voters remaining. Only 3 can win an election (due to its log containing
-                // all committed entries), but to do so it will need 1 to vote. But 1
-                // considers itself a learner and will continue to do so until 3 has
-                // stepped up as leader, replicates the conf change to 1, and 1 applies it.
-                // Ultimately, by receiving a request to vote, the learner realizes that
-                // the candidate believes it to be a voter, and that it should act
-                // accordingly. The candidate's config may be stale, too; but in that case
-                // it won't win the election, at least in the absence of the bug discussed
-                // in:
-                // https://github.com/etcd-io/etcd/issues/7625#issuecomment-488798263.
-                // logger_.info("{} [logterm: {}, index: {}, vote: {}] cast {} for {} [logterm: {}, index: {}] at term
-                // {}", 	id_, log_.lastTerm(), log_.lastIndex(), vote_, m.type(), m.from(), m.logterm(),
-                // m.index(),
-                // term_)
-                // When responding to Msg{Pre,}Vote messages we include the term
-                // from the message, not the local term. To see why, consider the
-                // case where a single node was previously partitioned away and
-                // it's local term is now out of date. If we include the local term
-                // (recall that for pre-votes we don't update the local term), the
-                // (pre-)campaigning node on the other end will proceed to ignore
-                // the message (it ignores all out of date messages).
-                // The term in the original message and current local term are the
-                // same in the case of regular votes, but different for pre-votes.
-                pb::Message msg;
-                msg.set_to(m.from());
-                msg.set_term(m.term());
-                msg.set_type(voteRespMsgType(m.type()));
-                send(std::move(msg));
-                if (m.type() == pb::MsgRequestVote) {
-                    // Only record real votes.
-                    electionElapsed_ = 0;
-                    vote_ = m.from();
-                }
-            } else {
-                // logger_.info("{} [logterm: {}, index: {}, vote: {}] rejected {} from {} [logterm: {}, index: {}] at
-                // term {}", 	id_, log_.lastTerm(), log_.lastIndex(), vote_, m.type(), m.from(), m.logterm(),
-                // m.index(), term_)
-                pb::Message msg;
-                msg.set_to(m.from());
-                msg.set_term(m.term());
-                msg.set_type(voteRespMsgType(m.type()));
-                msg.set_reject(true);
-                send(std::move(msg));
+                            (m.pre && m.term > term_)) &&
+              // up to date
+              log_.isUpToDate(m.lastLog.index, m.lastLog.term);
+
+            // Note: it turns out that that learners must be allowed to cast votes.
+            // This seems counter- intuitive but is necessary in the situation in which
+            // a learner has been promoted (i.e. is now a voter) but has not learned
+            // about this yet.
+            // For example, consider a group in which id=1 is a learner and id=2 and
+            // id=3 are voters. A configuration change promoting 1 can be committed on
+            // the quorum `{2,3}` without the config change being appended to the
+            // learner's log. If the leader (say 2) fails, there are de facto two
+            // voters remaining. Only 3 can win an election (due to its log containing
+            // all committed entries), but to do so it will need 1 to vote. But 1
+            // considers itself a learner and will continue to do so until 3 has
+            // stepped up as leader, replicates the conf change to 1, and 1 applies it.
+            // Ultimately, by receiving a request to vote, the learner realizes that
+            // the candidate believes it to be a voter, and that it should act
+            // accordingly. The candidate's config may be stale, too; but in that case
+            // it won't win the election, at least in the absence of the bug discussed
+            // in:
+            // https://github.com/etcd-io/etcd/issues/7625#issuecomment-488798263.
+
+            // When responding to Msg{Pre,}Vote messages we include the term
+            // from the message, not the local term. To see why, consider the
+            // case where a single node was previously partitioned away and
+            // it's local term is now out of date. If we include the local term
+            // (recall that for pre-votes we don't update the local term), the
+            // (pre-)campaigning node on the other end will proceed to ignore
+            // the message (it ignores all out of date messages).
+            // The term in the original message and current local term are the
+            // same in the case of regular votes, but different for pre-votes.
+            send(VoteResponse{
+              .to = m.from,
+              .term = m.term,
+              .pre = m.pre,
+              .reject = !granted,
+            });
+
+            if (!m.pre && granted) {
+                // Only record real votes.
+                electionElapsed_ = 0;
+                vote_ = m.from;
             }
             return {};
-        }
-        default:
         }
 
         switch (state_) {
         case Leader:
             return stepLeader(m);
+        case Candidate:
+        case PreCandidate:
+            return stepCandidate(m);
         case Follower:
             return stepFollower(m);
-        case PreCandidate:
-        case Candidate:
-            return stepCandidate(m);
         default:
-            panic("bad state: {}", uint64_t{ state_ });
+            panic("invalid state: ", int(state_));
         }
     }
 
 private:
+    // send schedules persisting state to a stable storage and AFTER that
+    // sending the message (as part of next Ready message processing).
+    template <Message Msg>
+    void send(Msg&& m)
+    {
+        m.from = id_;
+        if constexpr (one_of<Msg, VoteRequest, VoteResponse>) {
+            if (m.term == 0) {
+                panic("term should be set when sending {}, term: {}", typeid(m).name(), term_);
+            }
+        } else if constexpr (!one_of<Msg, ProposalRequst, ReadIndexRequest>) {
+            if (m.term != 0) {
+                panic("term should not be set when sending {} (was {})", typeid(m).name(), m.term);
+            }
+            m.term = term_;
+        }
+
+        msgs_.push_back(std::forward<Msg>(m));
+    }
+
     // switchToConfig reconfigures this node to use the provided configuration. It
     // updates the in-memory state and, when necessary, carries out additional
     // actions such as reacting to the removal of nodes or changed quorum
     // requirements.
     //
     // The inputs usually result from restoring a ConfState or applying a ConfChange.
-    pb::ConfState switchToConfig(confchange::ChangerResult& res)
+    ConfState switchToConfig(confchange::ChangerResult& res)
     {
-        tracker_.update(std::move(res.config_), std::move(res.progress_));
+        tracker_.reset(std::move(res.config_), std::move(res.progress_));
         tracker_.committedIndex();
         // logger_.info("{} switched to configuration {}", id_, tracker_.Config)
         auto cs = tracker_.confState();
@@ -723,7 +593,7 @@ private:
 
         // The remaining steps only make sense if this node is the leader and there
         // are other nodes.
-        if (state_ != Leader || cs.voters().empty()) {
+        if (state_ != Leader || cs.voters.empty()) {
             return cs;
         }
 
@@ -735,7 +605,7 @@ private:
             // Otherwise, still probe the newly added replicas; there's no reason to
             // let them wait out a heartbeat interval (or the next incoming
             // proposal).
-            tracker_.visit([&](uint64_t id, tracker::Progress&) {
+            tracker_.visit([&](NodeId id, tracker::Progress&) {
                 if (id == id_) {
                     return;
                 }
@@ -757,11 +627,12 @@ private:
     // argument controls whether messages with no entries will be sent
     // ("empty" messages are useful to convey updated Commit indexes, but
     // are undesirable when we're sending multiple messages in a batch).
-    bool sendAppend(uint64_t to, bool sendIfEmpty = true)
+    bool sendAppend(NodeId to, bool sendIfEmpty = true)
     {
         auto pr = tracker_.getProgress(to);
 
         if (pr->isPaused()) {
+            logger_.debug("paused");
             return false;
         }
 
@@ -787,59 +658,52 @@ private:
 
         if (lastTerm.has_error() || entries.has_error()) { // send snapshot if we failed to get term or entries
             if (!pr->recentActive()) {
-                // logger_.debug("ignore sending snapshot to {} since it is not recently active", to)
                 return false;
             }
 
             auto snap = log_.snapshot();
             if (snap.has_error()) {
                 if (snap.error() == ErrSnapshotTemporarilyUnavailable) {
-                    // logger_.debug("{} failed to send snapshot to {} because snapshot is temporarily unavailable",
-                    // id_, to)
                     return false;
                 }
                 snap.unwrap(); // TODO(bdarnell)
             }
-            auto snapshot = *snap;
+            auto snapshot = **snap;
 
-            if (isEmptySnap(*snapshot)) {
+            if (snapshot.empty()) {
                 panic("need non-empty snapshot");
             }
 
-            auto sindex = snapshot->metadata().index();
+            auto sindex = snapshot.meta.index;
 
-            // sindex, sterm = snapshot.Metadata.Index, snapshot.Metadata.Term
-            // logger_.debug("{} [firstindex: {}, commit: {}] sent snapshot[index: {}, term: {}] to {} [{}]",
-            //	id_, log_.firstIndex(), log_.committed, sindex, sterm, to, pr)
+            // sindex, sterm = snapshot.meta.Index, snapshot.meta.Term
             pr->becomeSnapshot(sindex);
-            // logger_.debug("{} paused sending replication messages to {} [{}]", id_, to, pr)
 
-            pb::Message msg;
-            msg.set_to(to);
-            msg.set_type(pb::MsgSnapshot);
-            *msg.mutable_snapshot() = std::move(*snapshot);
+            send(InstallSnapshotRequest{
+              .to = to,
+              .snapshot = snapshot,
+            });
 
-            send(std::move(msg));
             return true;
         }
 
         // Send the actual MsgAppend otherwise, and update the progress accordingly.
-        pr->updateOnEntriesSend(entries->size(), payloadsSize(*entries), nexIndex);
+        pr->sentEntries(entries->size(), payloadSize(*entries), nexIndex);
 
         // NB: pr has been updated, but we make sure to only use its old values below.
-        pb::Message msg;
-        msg.set_to(to);
-        msg.set_type(pb::MsgAppend);
-        msg.set_index(lastIndex);
-        msg.set_logterm(*lastTerm);
-        *msg.mutable_entries() = { entries->begin(), entries->end() };
-        msg.set_commit(log_.committed_);
-        send(std::move(msg));
+        send(AppendEntriesRequest{
+          .to = to,
+          .prevLog.index = lastIndex,
+          .prevLog.term = *lastTerm,
+          .entries = std::move(*entries),
+          .commit = log_.committed_,
+        });
+
         return true;
     }
 
     // sendHeartbeat sends a heartbeat RPC to the given peer.
-    void sendHeartbeat(uint64_t to, std::string ctx)
+    void sendHeartbeat(NodeId to, const std::string& ctx)
     {
         // Attach the commit as min(to.matched, r.committed).
         // When the leader sends out heartbeat message,
@@ -848,21 +712,18 @@ private:
         // The leader MUST NOT forward the follower's commit to
         // an unmatched index.
         auto commit = std::min(tracker_.getProgress(to)->match(), log_.committed_);
-
-        pb::Message msg;
-        msg.set_to(to);
-        msg.set_type(pb::MsgHeartbeat);
-        msg.set_commit(commit);
-        msg.set_context(std::move(ctx));
-
-        send(std::move(msg));
+        send(HeartbeatRequest{
+          .to = to,
+          .commit = commit,
+          .context = ctx,
+        });
     }
 
     // bcastAppend sends RPC, with entries to all peers that are not up-to-date
     // according to the progress recorded in tracker_.
     void bcastAppend()
     {
-        tracker_.visit([&](uint64_t id, tracker::Progress&) {
+        tracker_.visit([&](NodeId id, tracker::Progress&) {
             if (id == id_) {
                 return;
             }
@@ -872,7 +733,7 @@ private:
 
     void bcastHeartbeatWithCtx(const std::string& ctx)
     {
-        tracker_.visit([&](uint64_t id, tracker::Progress&) {
+        tracker_.visit([&](NodeId id, tracker::Progress&) {
             if (id == id_) {
                 return;
             }
@@ -887,7 +748,7 @@ private:
         bcastHeartbeatWithCtx(ctx);
     }
 
-    void appliedTo(uint64_t index, size_t size)
+    void appliedTo(Index index, size_t size)
     {
         auto oldApplied = log_.applied_;
         auto newApplied = std::max(index, oldApplied);
@@ -899,14 +760,14 @@ private:
             // nil Data which unmarshals into an empty ConfChangeV2 and has the
             // benefit that appendEntry can never refuse it based on its size
             // (which registers as zero).
-            auto m = confChangeToMsg();
+
             // NB: this proposal can't be dropped due to size, but can be
             // dropped if a leadership transfer is in progress. We'll keep
             // checking this condition on each applied entry, so either the
             // leadership transfer will succeed and the new leader will leave
             // the joint configuration, or the leadership transfer will fail,
             // and we will propose the config change on the next advance.
-            auto err = step(m);
+            proposeConfChange(ConfChange{});
 
             // if( err = step(m); err != nil ){
             //	logger_.debug("not initiating automatic transition out of joint configuration {}: {}",
@@ -941,13 +802,13 @@ private:
 
         electionElapsed_ = 0;
         heartbeatElapsed_ = 0;
-        resetRandomizedElectionTimeout();
+        randomizedElectionTimeout_ = rng_();
 
         abortLeaderTransfer();
 
         tracker_.resetVotes();
         auto lastIndex = log_.lastIndex();
-        tracker_.visit([&](uint64_t id, tracker::Progress& p) {
+        tracker_.visit([&](NodeId id, tracker::Progress& p) {
             Index match = 0;
             Index next = log_.lastIndex() + 1;
             if (id == id_) {
@@ -965,16 +826,12 @@ private:
     bool appendEntry(EntrySlice es)
     {
         auto li = log_.lastIndex();
-        for (uint64_t i = 0; i < es.size(); i++) {
-            es[i].set_term(term_);
-            es[i].set_index(li + 1 + i);
+        for (auto i : std::views::iota(0uz, es.size())) {
+            es[i].term = term_;
+            es[i].index = li + i + 1;
         }
         // Track the size of this uncommitted proposal.
         if (!increaseUncommittedSize(es)) {
-            // r.logger.Warningf(
-            //	"{} appending new entries to log would exceed uncommitted entry size limit; dropping proposal",
-            //	id_,
-            //)
             //  Drop the proposal.
             return false;
         }
@@ -985,33 +842,27 @@ private:
         // response message will be added to msgsAfterAppend and delivered back to
         // this node after these entries have been written to stable storage. When
         // handled, this is roughly equivalent to:
-        //
-        //  tracker_.Progress[id_].MaybeUpdate(e.Index)
-        //  if( r.maybeCommit() ){
-        //  	r.bcastAppend()
-        //  }
-        pb::Message msg;
-        msg.set_to(id_);
-        msg.set_type(pb::MsgAppendResponse);
-        msg.set_index(li);
-        send(std::move(msg));
+
+        send(AppendEntriesResponse{
+          .to = id_,
+          .index = li,
+          .reject = false,
+        });
+
         return true;
     }
 
-    // tickElection is run by followers and candidates after electionTimeout_.
-    void tickElection()
+    void tick()
     {
-        electionElapsed_++;
-
-        if (promotable() && pastElectionTimeout()) {
-            electionElapsed_ = 0;
-            hup();
+        if (state_ != Leader) {
+            electionElapsed_++;
+            if (promotable() && pastElectionTimeout()) {
+                electionElapsed_ = 0;
+                hup();
+            }
+            return;
         }
-    }
 
-    // tickHeartbeat is run by leaders to send a MsgBeat after heartbeatTimeout_.
-    void tickHeartbeat()
-    {
         heartbeatElapsed_++;
         electionElapsed_++;
 
@@ -1038,52 +889,48 @@ private:
 
     void becomeCandidate()
     {
-        // TODO(xiangli) remove the panic when the raft implementation is stable
         if (state_ == Leader) {
             panic("invalid transition [leader -> candidate]");
         }
+        logger_.info("transition [ {} -> {} ], term {}", state_, Candidate, term_);
         reset(term_ + 1);
-        // tick_ = tickElection_;
         vote_ = id_;
         state_ = Candidate;
-        // logger_.info("{} became candidate at term {}", id_, term_)
     }
 
     void becomePreCandidate()
     {
-        // TODO(xiangli) remove the panic when the raft implementation is stable
         if (state_ == Leader) {
             panic("invalid transition [leader -> pre-candidate]");
         }
+        logger_.info("transition [ {} -> {} ], term {}", state_, PreCandidate, term_);
         // Becoming a pre-candidate changes our step functions and state,
         // but doesn't change anything else. In particular it does not increase
         // term_ or change vote_.
         tracker_.resetVotes();
-        // r.tick = r.tickElection
         lead_ = InvalidId;
         state_ = PreCandidate;
-        // logger_.info("{} became pre-candidate at term {}", id_, term_)
     }
 
-    void becomeFollower(Term term, uint64_t lead)
+    void becomeFollower(Term term, NodeId lead)
     {
-        // step = stepFollower
+        logger_.info("transition [ {} -> {} ], term {}", state_, Follower, term_);
         reset(term);
         lead_ = lead;
         state_ = Follower;
-        // logger_.info("{} became follower at term {}", id_, term_)
     }
 
     void becomeLeader()
     {
-        // TODO(xiangli) remove the panic when the raft implementation is stable
         if (state_ == Follower) {
             panic("invalid transition [follower -> leader]");
         }
+
+        logger_.info("transition [ {} -> {} ], term {}", state_, Leader, term_);
         reset(term_);
-        // r.tick = r.tickHeartbeat
         lead_ = id_;
         state_ = Leader;
+
         // Followers enter replicate mode when they've been successfully probed
         // (perhaps after having received a snapshot as a result). The leader is
         // trivially in this state. Note that r.reset() has initialized this
@@ -1101,11 +948,9 @@ private:
         // could be expensive.
         pendingConfIndex_ = log_.lastIndex();
 
-        google::protobuf::RepeatedPtrField<pb::Entry> entries;
-        entries.Add()->set_type(pb::EntryEmpty);
+        EntryList empty{ Entry{ EntryEmpty } };
 
-        EntrySlice es{ entries };
-        if (!appendEntry(es)) {
+        if (!appendEntry(empty)) {
             // This won't happen because we just called reset() above.
             panic("empty entry was dropped");
         }
@@ -1113,7 +958,6 @@ private:
         // so the preceding log append does not count against the uncommitted log
         // quota of the new leader. In other words, after the call to appendEntry,
         // uncommittedSize_ is still 0.
-        // logger_.info("{} became leader at term {}", id_, term_)
     }
 
     void hup(bool transfer = false)
@@ -1154,9 +998,8 @@ private:
         // outside the raft package.
         auto pageSize = log_.maxApplyingEntsSize_;
         auto res = log_.scan(lo, hi, pageSize, [&](EntryList& ents) -> Result<> {
-            auto found = (std::find_if(ents.begin(), ents.end(), [](const pb::Entry& e) {
-                              return e.type() == pb::EntryConfChange;
-                          }) != ents.end());
+            auto found = (std::find_if(ents.begin(), ents.end(),
+                                       [](const Entry& e) { return e.type == EntryConfChange; }) != ents.end());
             if (found) {
                 return ErrLogScanBreak;
             }
@@ -1179,21 +1022,18 @@ private:
         //  better safe than sorry.
         //  r.logger.Warningf("{} is unpromotable; campaign() should have been called", id_)
         //}
-        uint64_t term;
-        pb::MessageType voteMsg;
+        Term term;
         if (t == CampaignPreElection) {
             becomePreCandidate();
-            voteMsg = pb::MsgRequestPreVote;
             // PreVote RPCs are sent for the next term before we've incremented term_.
             term = term_ + 1;
         } else {
             becomeCandidate();
-            voteMsg = pb::MsgRequestVote;
             term = term_;
         }
 
-        tracker_.visit([&](uint64_t id, tracker::Progress& p) {
-            if (tracker_.config().learners_.contains(id)) {
+        tracker_.visit([&](NodeId id, tracker::Progress& p) {
+            if (tracker_.isLearner(id)) {
                 return;
             }
             if (id == id_) {
@@ -1202,39 +1042,33 @@ private:
                 // send a MsgRequestVote to itself). This response message will be added to
                 // msgsAfterAppend and delivered back to this node after the vote
                 // has been written to stable storage.
-                pb::Message msg;
-                msg.set_to(id);
-                msg.set_term(term);
-                msg.set_type(voteRespMsgType(voteMsg));
-                send(std::move(msg));
+                send(VoteResponse{
+                  .to = id,
+                  .term = term,
+                  .pre = (t == CampaignPreElection),
+                  .reject = false,
+                });
                 return;
             }
-            // logger_.info("{} [logterm: {}, index: {}] sent {} request to {} at term {}",
-            //	id_, log_.lastTerm(), log_.lastIndex(), voteMsg, id, term_)
 
-            // var ctx []byte
-            // if( t == campaignTransfer ){
-            //	ctx = []byte(t)
-            // }
-            pb::Message msg;
-            msg.set_to(id);
-            msg.set_term(term);
-            msg.set_type(voteMsg);
-            msg.set_index(log_.lastIndex());
-            msg.set_logterm(log_.lastTerm());
-            if (t == CampaignTransfer) {
-                msg.mutable_context()->push_back(t);
-            }
-            send(std::move(msg));
+            send(VoteRequest {
+                .to = id,
+                .pre = (t == CampaignPreElection),
+                .term = term,
+                .lastLog = {
+                    .index = log_.lastIndex(),
+                    .term = log_.lastTerm(),
+                },
+            });
         });
     }
 
-    Result<> stepLeader(pb::Message& m)
+    template <Message Msg>
+    Result<> stepLeader(Msg&& m)
     {
-        // These message types do not require any progress for m.from().
-        switch (m.type()) {
-        case pb::MsgPropose: {
-            if (m.entries().empty()) {
+        // These message types do not require any progress for m.from.
+        if constexpr (one_of<Msg, ProposalRequst>) {
+            if (m.entries.empty()) {
                 panic("stepped empty MsgPropose");
             }
             if (!tracker_.contains(id_)) {
@@ -1244,33 +1078,31 @@ private:
                 return ErrProposalDropped;
             }
             if (leadTransferee_ != InvalidId) {
-                logger_.debug("{} [term {}] transfer leadership to {} is in progress; dropping proposal", id_, term_,
-                               leadTransferee_);
                 return ErrProposalDropped;
             }
 
-            for (uint64_t i = 0; i < m.entries_size(); i++) {
-                auto& e = m.entries(i);
-                if (e.type() != pb::EntryConfChange) {
+            for (auto i : std::views::iota(0uz, m.entries.size())) {
+                auto& e = m.entries[i];
+                if (e.type != EntryConfChange) {
                     continue;
                 }
 
-                pb::ConfChange cc;
-                if (!cc.ParseFromString(e.data())) {
+                ConfChange cc;
+                if (!cc.parse(e.data)) {
                     panic("parse confchange failed");
                 }
 
                 // if (cc.IsInitialized()) {
                 auto alreadyPending = (pendingConfIndex_ > log_.applied_);
                 auto alreadyJoint = tracker_.config().voters_.isJoint();
-                auto wantsLeaveJoint = cc.changes().empty();
+                auto wantsLeaveJoint = cc.changes.empty();
 
                 bool failed = false;
                 // var failedCheck string
                 if (alreadyPending) {
                     failed = true;
                     logger_.info("possible unapplied conf change at index {} (applied to {})", pendingConfIndex_,
-                                  log_.applied_);
+                                 log_.applied_);
                 } else if (alreadyJoint && !wantsLeaveJoint) {
                     failed = true;
                     logger_.info("must transition out of joint config first");
@@ -1280,25 +1112,20 @@ private:
                 }
 
                 if (failed && !disableConfChangeValidation_) {
-                    // logger_.info("ignoring conf change {} at config {}: {}", cc.ShortDebugString(),
-                    // to_string(tracker_.config()));
-                    pb::Entry empty;
-                    empty.set_type(pb::EntryEmpty);
-                    *m.mutable_entries(i) = empty;
+                    m.entries[i] = { .type = EntryEmpty };
                 } else {
                     pendingConfIndex_ = log_.lastIndex() + i + 1;
                 }
                 //}
             }
-            EntrySlice es{ *m.mutable_entries() };
+            EntrySlice es{ m.entries };
 
             if (!appendEntry(es)) {
                 return ErrProposalDropped;
             }
             bcastAppend();
             return {};
-        }
-        case pb::MsgReadIndex: {
+        } else if constexpr (one_of<Msg, ReadIndexRequest>) {
             // only one voting member (the leader) in the cluster
             if (tracker_.isSingleton()) {
                 handleReadIndexReady(m, log_.committed_);
@@ -1313,26 +1140,17 @@ private:
 
             handleReadIndex(m);
             return {};
-        }
-        default:
-            break;
-        }
-
-        // All other message types require a progress for m.from() (pr).
-        auto pr = tracker_.getProgress(m.from());
-        if (!pr) {
-            // logger_.debug("{} no progress available for {}", id_, m.from())
-            return {};
-        }
-
-        switch (m.type()) {
-        case pb::MsgAppendResponse: {
+        } else if constexpr (one_of<Msg, AppendEntriesResponse>) {
+            auto pr = tracker_.getProgress(m.from);
+            if (!pr) {
+                return {};
+            }
             // NB: this code path is also hit from (*raft).advance, where the leader steps
             // an MsgAppendResponse to acknowledge the appended entries in the last Ready.
 
             pr->setRecentActive(true);
 
-            if (m.reject()) {
+            if (m.reject) {
                 // RejectHint is the suggested next base entry for appending (i.e.
                 // we try to append entry RejectHint+1 next), and LogTerm is the
                 // term that the follower has at index RejectHint. Older versions
@@ -1355,9 +1173,9 @@ private:
                 // described below.
                 // logger_.debug("{} received MsgAppendResponse(rejected, hint: (index {}, term {})) from {} for index
                 // {}",
-                //	id_, m.RejectHint, m.logterm(), m.from(), m.index())
-                auto nextProbeIdx = m.reject_hint();
-                if (m.logterm() > 0) {
+                //	id_, m.RejectHint, m.logTerm, m.from, m.index)
+                auto nextProbeIdx = m.rejectHint.index;
+                if (m.rejectHint.term > 0) {
                     // If the follower has an uncommitted log tail, we would end up
                     // probing one by one until we hit the common prefix.
                     //
@@ -1452,14 +1270,14 @@ private:
                     //    7, the rejection points it at the end of the follower's log
                     //    which is at a higher log term than the actually committed
                     //    log.
-                    nextProbeIdx = log_.findConflictByTerm(m.reject_hint(), m.logterm()).index;
+                    nextProbeIdx = log_.findConflictByTerm(m.rejectHint.index, m.rejectHint.term).index;
                 }
-                if (pr->maybeDecrTo(m.index(), nextProbeIdx)) {
-                    // logger_.debug("{} decreased progress of {} to [{}]", id_, m.from(), pr)
+                if (pr->maybeDecrTo(m.index, nextProbeIdx)) {
+                    // logger_.debug("{} decreased progress of {} to [{}]", id_, m.from, pr)
                     if (pr->state() == tracker::StateReplicate) {
                         pr->becomeProbe();
                     }
-                    sendAppend(m.from());
+                    sendAppend(m.from);
                 }
             } else {
                 auto oldPaused = pr->isPaused();
@@ -1467,11 +1285,11 @@ private:
                 // matched index or if the response can move a probing peer back
                 // into StateReplicate (see heartbeat_rep_recovers_from_probing.txt
                 // for an example of the latter case).
-                // NB: the same does not make sense for StateSnapshot - if `m.index()`
-                // equals pr->Match we know we don't m.index()+1 in our log, so moving
+                // NB: the same does not make sense for StateSnapshot - if `m.index`
+                // equals pr->Match we know we don't m.index+1 in our log, so moving
                 // back to replicating state is not useful; besides pr->PendingSnapshot
                 // would prevent it.
-                if (pr->maybeUpdate(m.index()) || (pr->match() == m.index() && pr->state() == tracker::StateProbe)) {
+                if (pr->update(m.index) || (pr->match() == m.index && pr->state() == tracker::StateProbe)) {
                     if (pr->state() == tracker::StateProbe) {
                         pr->becomeReplicate();
                     } else if (pr->state() == tracker::StateSnapshot && pr->match() + 1 >= log_.firstIndex()) {
@@ -1483,7 +1301,7 @@ private:
                         // see the comments on PendingSnapshot.
 
                         // logger_.debug("{} recovered from needing snapshot, resumed sending replication messages to
-                        // {} [{}]", id_, m.from(), pr)
+                        // {} [{}]", id_, m.from, pr)
                         //  Transition back to replicating state via probing state
                         //  (which takes the snapshot into account). If we didn't
                         //  move to replicating state, that would only happen with
@@ -1492,7 +1310,7 @@ private:
                         pr->becomeProbe();
                         pr->becomeReplicate();
                     } else if (pr->state() == tracker::StateReplicate) {
-                        pr->inflights().freeLE(m.index());
+                        pr->inflights().freeLE(m.index);
                     }
 
                     if (maybeCommit()) {
@@ -1502,7 +1320,7 @@ private:
                     } else if (oldPaused) {
                         // If we were paused before, this node may be missing the
                         // latest commit index, so send it.
-                        sendAppend(m.from());
+                        sendAppend(m.from);
                     }
                     // We've updated flow control information above, which may
                     // allow us to send multiple (size-limited) in-flight messages
@@ -1510,21 +1328,25 @@ private:
                     // replicate, or when freeTo() covers multiple messages). If
                     // we have more entries to send, send as many messages as we
                     // can (without sending empty messages for the commit index)
-                    if (id_ != m.from()) {
+                    if (id_ != m.from) {
                         //??
-                        sendAppend(m.from(), false /* sendif(Empty */);
+                        sendAppend(m.from, false /* sendif(Empty */);
                     }
                     // Transfer leadership is in progress.
-                    if (m.from() == leadTransferee_ && pr->match() == log_.lastIndex()) {
-                        // logger_.info("{} sent MsgTimeoutNow to {} after received MsgAppendResponse", id_, m.from())
-                        sendTimeoutNow(m.from());
+                    if (m.from == leadTransferee_ && pr->match() == log_.lastIndex()) {
+                        // logger_.info("{} sent MsgTimeoutNow to {} after received MsgAppendResponse", id_, m.from)
+                        sendTimeoutNow(m.from);
                     }
                 }
             }
-        } break;
-        case pb::MsgHeartbeatResponse: {
+        } else if constexpr (one_of<Msg, HeartbeatResponse>) {
+            auto pr = tracker_.getProgress(m.from);
+            if (!pr) {
+                return {};
+            }
+
             pr->setRecentActive(true);
-            pr->setMsgAppFlowPaused(false);
+            pr->resume();
 
             // NB: if the follower is paused (full Inflights), this will still send an
             // empty append, allowing it to recover from situations in which all the
@@ -1540,28 +1362,38 @@ private:
             // `pr->Paused()` is always true for StateSnapshot, so sendAppend is a
             // no-op.
             if (pr->match() < log_.lastIndex() || pr->state() == tracker::StateProbe) {
-                sendAppend(m.from());
+                sendAppend(m.from);
             }
 
-            if (readOnly_.option() != ReadIndexSafe || m.context().empty()) {
+            if (readOnly_.option() != ReadIndexSafe || m.context.empty()) {
                 return {};
             }
 
-            if (tracker_.config().voters_.voteResult(readOnly_.recvAck(m.from(), m.context())) != quorum::VoteWon) {
+            if (tracker_.config().voters_.voteResult([&](NodeId id) {
+                    auto& votes = readOnly_.recvAck(m.from, m.context);
+                    auto iter = votes.find(id);
+                    if (iter == votes.end()) {
+                        return quorum::VotePending;
+                    }
+                    return quorum::VoteWon;
+                }) != quorum::VoteWon) {
                 return {};
             }
 
-            auto rss = readOnly_.advance(m.context());
+            auto rss = readOnly_.advance(m.context);
             for (auto rs : rss) {
                 handleReadIndexReady(rs.req, rs.index);
             }
-        } break;
-        case pb::MsgTransferLeader: {
-            if (tracker_.config().learners_.contains(m.from())) {
+        } else if constexpr (one_of<Msg, TransferLeaderRequest>) {
+            auto pr = tracker_.getProgress(m.from);
+            if (!pr) {
+                return {};
+            }
+            if (tracker_.config().learners_.contains(m.from)) {
                 // logger_.debug("{} is learner. Ignored transferring leadership", id_)
                 return {};
             }
-            auto leadTransferee = m.from();
+            auto leadTransferee = m.from;
             auto lastLeadTransferee = leadTransferee_;
             if (lastLeadTransferee != InvalidId) {
                 if (lastLeadTransferee == leadTransferee) {
@@ -1589,70 +1421,53 @@ private:
             } else {
                 sendAppend(leadTransferee);
             }
-        } break;
-        default:
-            break;
         }
         return {};
     }
 
     // stepCandidate is shared by StateCandidate and StatePreCandidate; the difference is
     // whether they respond to MsgRequestVoteResponse or MsgRequestPreVoteResponse.
-    Result<> stepCandidate(pb::Message& m)
+    template <Message Msg>
+    Result<> stepCandidate(Msg&& m)
     {
-        // Only handle vote responses corresponding to our candidacy (while in
-        // StateCandidate, we may get stale MsgRequestPreVoteResponse messages in this term from
-        // our pre-candidate state).
-        pb::MessageType voteRespType;
-        if (state_ == PreCandidate) {
-            voteRespType = pb::MsgRequestPreVoteResponse;
-        } else {
-            voteRespType = pb::MsgRequestVoteResponse;
-        }
-
-        switch (m.type()) {
-        case pb::MsgPropose:
-            // logger_.info("{} no leader at term {}; dropping proposal", id_, term_)
+        if constexpr (one_of<Msg, ProposalRequst>) {
+            logger_.info("no leader at term {}; dropping proposal", term_);
             return ErrProposalDropped;
-        case pb::MsgAppend:
-            becomeFollower(m.term(), m.from()); // always m.term() == term_
-            handleAppendEntries(m);
-            break;
-        case pb::MsgHeartbeat:
-            becomeFollower(m.term(), m.from()); // always m.term() == term_
+        } else if constexpr (one_of<Msg, HeartbeatRequest>) {
+            becomeFollower(m.term, m.from);
             handleHeartbeat(m);
-            break;
-        case pb::MsgSnapshot:
-            becomeFollower(m.term(), m.from()); // always m.term() == term_
+        } else if constexpr (one_of<Msg, AppendEntriesRequest>) {
+            becomeFollower(m.term, m.from);
+            handleAppendEntries(m);
+        } else if constexpr (one_of<Msg, InstallSnapshotRequest>) {
+            becomeFollower(m.term, m.from); // always m.term == term_
             handleSnapshot(m);
-            break;
-        case pb::MsgTimeoutNow:
-            // logger_.debug("{} [term {} state {}] ignored MsgTimeoutNow from {}", id_, term_, state_, m.from())
-            break;
-        default:
-            if (m.type() == voteRespType) {
-                tracker_.recordVote(m.from(), m.type());
-                auto details = tracker_.tallyVotes();
-                if (details.result_ == quorum::VoteWon) {
+        } else if constexpr (one_of<Msg, VoteResponse>) {
+            // Only handle vote responses corresponding to our candidacy (while in
+            // StateCandidate, we may get stale MsgRequestPreVoteResponse messages in this term from
+            // our pre-candidate state).
+            if ((m.pre ? PreCandidate : Candidate) == state_) {
+                tracker_.recordVote(m.from, !m.reject);
+                auto voteResult = tracker_.voteResult();
+                if (voteResult == quorum::VoteWon) {
                     if (state_ == PreCandidate) {
                         campaign(CampaignElection);
                     } else {
                         becomeLeader();
                         bcastAppend();
                     }
-                } else if (details.result_ == quorum::VoteLost) {
+                } else if (voteResult == quorum::VoteLost) {
                     becomeFollower(term_, InvalidId);
                 }
             }
         }
-
         return {};
     }
 
-    Result<> stepFollower(pb::Message& m)
+    template <Message Msg>
+    Result<> stepFollower(Msg&& m)
     {
-        switch (m.type()) {
-        case pb::MsgPropose:
+        if constexpr (one_of<Msg, ProposalRequst>) {
             if (lead_ == InvalidId) {
                 logger_.info("{} no leader at term {}; dropping proposal", id_, term_);
                 return ErrProposalDropped;
@@ -1660,159 +1475,57 @@ private:
                 logger_.info("{} not forwarding to leader {} at term {}; dropping proposal", id_, lead_, term_);
                 return ErrProposalDropped;
             }
-            m.set_to(lead_);
+            m.to = lead_;
             send(m);
-            break;
-        case pb::MsgAppend:
+            logger_.debug("forward proposal {} -> {}", id_, lead_);
+        } else if constexpr (one_of<Msg, HeartbeatRequest>) {
             electionElapsed_ = 0;
-            lead_ = m.from();
-            handleAppendEntries(m);
-            break;
-        case pb::MsgHeartbeat:
-            electionElapsed_ = 0;
-            lead_ = m.from();
+            lead_ = m.from;
             handleHeartbeat(m);
-            break;
-        case pb::MsgSnapshot:
+        } else if constexpr (one_of<Msg, AppendEntriesRequest>) {
             electionElapsed_ = 0;
-            lead_ = m.from();
+            lead_ = m.from;
+            handleAppendEntries(m);
+        } else if constexpr (one_of<Msg, InstallSnapshotRequest>) {
+            electionElapsed_ = 0;
+            lead_ = m.from;
             handleSnapshot(m);
-            break;
-        case pb::MsgTransferLeader:
+        } else if constexpr (one_of<Msg, TransferLeaderRequest>) {
             if (lead_ == InvalidId) {
                 logger_.info("{} no leader at term {}; dropping leader transfer msg", id_, term_);
                 return {};
             }
-            m.set_to(lead_);
+            m.to = lead_;
             send(m);
-            break;
-        case pb::MsgTimeoutNow:
+        } else if constexpr (one_of<Msg, TimeoutNowRequest>) {
             logger_.info("{} [term {}] received MsgTimeoutNow from {} and starts an election to get leadership.", id_,
-                          term_, m.from());
+                         term_, m.from);
             //  Leadership transfers never use pre-vote even if r.preVote is true; we
             //  know we are not recovering from a partition so there is no need for the
             //  extra round trip.
             hup(true);
-            break;
-        case pb::MsgReadIndex:
+        } else if constexpr (one_of<Msg, ReadIndexRequest>) {
             if (lead_ == InvalidId) {
-                logger_.debug("{} no leader at term {}; dropping index reading msg", id_, term_);
+                logger_.debug("no leader at term {}; dropping index reading msg", term_);
                 return {};
             }
-            m.set_to(lead_);
+            m.to = lead_;
             send(m);
-            break;
-        case pb::MsgReadIndexResponse:
-            if (m.entries().size() != 1) {
-                logger_.error("{} invalid format of MsgReadIndexResponse from {}, entries count: {}", id_, m.from(),
-                               m.entries().size());
-                return {};
-            }
-            readStates_.push_back(ReadState{ m.index(), m.entries(0).data() });
-            break;
-        default:
-            break;
+        } else if constexpr (one_of<Msg, ReadIndexResponse>) {
+            readStates_.push_back(ReadState{ m.index, m.context });
         }
         return {};
-    }
-
-    void handleAppendEntries(pb::Message& m)
-    {
-        pb::Message msg;
-        msg.set_to(m.from());
-        msg.set_type(pb::MsgAppendResponse);
-
-        if (m.index() < log_.committed_) {
-            msg.set_index(log_.committed_);
-            send(std::move(msg));
-            return;
-        }
-
-        // auto es = std::ranges::subrange(m.entries().begin(), m.entries().end());
-        EntrySlice es{ *m.mutable_entries() };
-
-        auto lastIndex = log_.maybeAppend(m.index(), m.logterm(), m.commit(), es);
-
-        if (lastIndex) {
-            msg.set_index(*lastIndex);
-            send(std::move(msg));
-            return;
-        }
-        // logger_.debug("{} [logterm: {}, index: {}] rejected MsgAppend [logterm: {}, index: {}] from {}",
-        //	id_, log_.zeroTermOnOutOfBounds(log_.term(m.index())), m.index(), m.logterm(), m.index(), m.from())
-
-        // Our log does not match the leader's at index m.index(). Return a hint to the
-        // leader - a guess on the maximal (index, term) at which the logs match. Do
-        // this by searching through the follower's log for the maximum (index, term)
-        // pair with a term <= the MsgAppend's LogTerm and an index <= the MsgAppend's
-        // Index. This can help skip all indexes in the follower's uncommitted tail
-        // with terms greater than the MsgAppend's LogTerm.
-        //
-        // See the other caller for findConflictByTerm (in stepLeader) for a much more
-        // detailed explanation of this mechanism.
-
-        // NB: m.index() >= raftLog.committed by now (see the early return above), and
-        // raftLog.lastIndex() >= raftLog.committed by invariant, so min of the two is
-        // also >= raftLog.committed. Hence, the findConflictByTerm argument is within
-        // the valid interval, which then will return a valid (index, term) pair with
-        // a non-zero term (unless the log is empty). However, it is safe to send a zero
-        // LogTerm in this response in any case, so we don't verify it here.
-        auto [hintIndex, hintTerm] = log_.findConflictByTerm(std::min(m.index(), log_.lastIndex()), m.logterm());
-
-        msg.set_index(m.index());
-        msg.set_reject(true);
-        msg.set_reject_hint(hintIndex);
-        msg.set_logterm(hintTerm);
-
-        send(std::move(msg));
-    }
-
-    void handleHeartbeat(pb::Message& m)
-    {
-        log_.commitTo(m.commit());
-
-        pb::Message msg;
-        msg.set_to(m.from());
-        msg.set_type(pb::MsgHeartbeatResponse);
-        msg.set_context(m.context());
-        send(std::move(msg));
-    }
-
-    void handleSnapshot(pb::Message& m)
-    {
-        // MsgSnapshot messages should always carry a non-nil Snapshot, but err on the
-        // side of safety and treat a nil Snapshot as a zero-valued Snapshot.
-        auto snapshot = std::make_shared<pb::Snapshot>();
-        if (m.has_snapshot()) {
-            *snapshot = m.snapshot();
-        }
-        auto sindex = snapshot->metadata().index();
-        auto sterm = snapshot->metadata().index();
-
-        pb::Message msg;
-        msg.set_to(m.from());
-        msg.set_type(pb::MsgAppendResponse);
-
-        if (restore(snapshot)) {
-            logger_.info("{} [commit: {}] restored snapshot [index: {}, term: {}]", id_, log_.committed_, sindex,
-                          sterm);
-            msg.set_index(log_.lastIndex());
-        } else {
-            logger_.info("{} [commit: {}] ignored snapshot [index: {}, term: {}]", id_, log_.committed_, sindex,
-                          sterm);
-            msg.set_index(log_.committed_);
-        }
-        send(std::move(msg));
     }
 
     // restore recovers the state machine from a snapshot. It restores the log and the
     // configuration of state machine. If this method returns false, the snapshot was
     // ignored, either because it was obsolete or because of an error.
-    bool restore(std::shared_ptr<pb::Snapshot> snapshot)
+    bool restore(SnapshotPtr snapshot)
     {
-        if (snapshot->metadata().index() <= log_.committed_) {
+        if (snapshot->meta.index <= log_.committed_) {
             return false;
         }
+
         if (state_ != Follower) {
             // This is defense-in-depth: if the leader somehow ended up applying a
             // snapshot, it could move into a new term without moving into a
@@ -1829,27 +1542,23 @@ private:
         // More defense-in-depth: throw away snapshot if recipient is not in the
         // config. This shouldn't ever happen (at the time of writing) but lots of
         // code here and there assumes that id_ is in the progress tracker::
-        auto& cs = snapshot->metadata().conf_state();
+        auto& cs = snapshot->meta.confState;
 
-        auto find = [&](auto& s) -> bool { return std::find(s.begin(), s.end(), id_) != s.end(); };
+        auto contains = [](auto& c, auto& v) { return std::binary_search(c.begin(), c.end(), v); };
 
-        bool found = find(cs.voters()) || find(cs.learners()) || find(cs.voters_outgoing());
+        bool found = contains(cs.voters, id_) || contains(cs.learners, id_) || contains(cs.votersOutgoing, id_);
 
         if (!found) {
-            // r.logger.Warningf(
-            //	"{} attempted to restore snapshot but it is not in the ConfState {}; should never happen",
-            //	id_, cs,
-            //)
             return false;
         }
 
         // Now go ahead and actually restore.
 
-        if (log_.matchTerm(snapshot->metadata().index(), snapshot->metadata().term())) {
+        if (log_.matchTerm(snapshot->meta.index, snapshot->meta.term)) {
             // logger_.info("{} [commit: {}, lastindex: {}, lastterm: {}] fast-forwarded commit to snapshot [index:
-            // {}, term: {}]", 	id_, log_.committed, log_.lastIndex(), log_.lastTerm(), s.Metadata.Index,
-            // s.Metadata.Term)
-            log_.commitTo(snapshot->metadata().index());
+            // {}, term: {}]", 	id_, log_.committed, log_.lastIndex(), log_.lastTerm(), s.meta.Index,
+            // s.meta.Term)
+            log_.commitTo(snapshot->meta.index);
             return false;
         }
 
@@ -1860,15 +1569,17 @@ private:
 
         // panic should never happen. Either there's a bug in our config change
         // handling or the client corrupted the conf change.
-        auto changeResult = std::move(confchange::restore(cs, progressCreator()).unwrap());
+        auto changeResult = std::move(confchange::restore(cs, tracker_, log_.lastIndex()).unwrap());
 
-        assertConfStatesEquivalent(cs, switchToConfig(changeResult));
+        if (cs != switchToConfig(changeResult)) {
+            panic("mismatching confstate after snapshot restore");
+        }
 
         auto pr = tracker_.getProgress(id_);
-        pr->maybeUpdate(pr->next() - 1); // TODO(tbg): this is untested and likely unneeded
+        pr->update(pr->next() - 1); // TODO(tbg): this is untested and likely unneeded
 
         // logger_.info("{} [commit: {}, lastindex: {}, lastterm: {}] restored snapshot [index: {}, term: {}]",
-        //	id_, log_.committed, log_.lastIndex(), log_.lastTerm(), s.Metadata.Index, s.Metadata.Term)
+        //	id_, log_.committed, log_.lastIndex(), log_.lastTerm(), s.meta.Index, s.meta.Term)
         return true;
     }
 
@@ -1876,18 +1587,17 @@ private:
     // which is true when its own id is in progress list.
     bool promotable()
     {
-        return tracker_.contains(id_) && !tracker_.config().learners_.contains(id_) &&
-          !log_.hasNextOrInProgressSnapshot();
+        return tracker_.contains(id_) && !tracker_.isLearner(id_) && !log_.hasNextOrInProgressSnapshot();
     }
 
-    void loadState(const pb::HardState& state)
+    void loadState(const HardState& state)
     {
-        if (state.commit() < log_.committed_ || state.commit() > log_.lastIndex()) {
+        if (state.commit < log_.committed_ || state.commit > log_.lastIndex()) {
             panic("{} state.commit {} is out of range [{}, {}]");
         }
-        log_.committed_ = state.commit();
-        term_ = state.term();
-        vote_ = state.vote();
+        log_.committed_ = state.commit;
+        term_ = state.term;
+        vote_ = state.vote;
     }
 
     // pastElectionTimeout returns true if electionElapsed_ is greater
@@ -1895,17 +1605,12 @@ private:
     // [electiontimeout, 2 * electiontimeout - 1].
     bool pastElectionTimeout() { return electionElapsed_ >= randomizedElectionTimeout_; }
 
-    void resetRandomizedElectionTimeout()
+    void sendTimeoutNow(NodeId to)
     {
-        randomizedElectionTimeout_ = electionTimeout_ + (std::rand() % electionTimeout_);
-    }
-
-    void sendTimeoutNow(uint64_t to)
-    {
-        pb::Message msg;
-        msg.set_to(to);
-        msg.set_type(pb::MsgTimeoutNow);
-        send(std::move(msg));
+        // Message msg;
+        // msg.to = to;
+        // msg.type = MsgTimeoutNow;
+        // send(std::move(msg));
     }
 
     void abortLeaderTransfer() { leadTransferee_ = InvalidId; }
@@ -1920,19 +1625,18 @@ private:
 
     // responseToReadIndex constructs a response for `req`. If `req` comes from the peer
     // itself, a blank value will be returned.
-    void handleReadIndexReady(const pb::Message& req, Index idx)
+    void handleReadIndexReady(ReadIndexRequest& m, Index idx)
     {
-        if (req.from() == InvalidId || req.from() == id_) {
-            readStates_.push_back(ReadState{ idx, req.entries(0).data() });
+        if (m.from == InvalidId || m.from == id_) {
+            readStates_.push_back(ReadState{ idx, m.context });
             return;
         }
 
-        pb::Message msg;
-        msg.set_type(pb::MsgReadIndexResponse);
-        msg.set_to(req.from());
-        msg.set_index(idx);
-        *msg.mutable_entries() = req.entries();
-        send(msg);
+        send(ReadIndexResponse{
+          .to = m.from,
+          .index = idx,
+          .context = m.context,
+        });
     }
 
     // increaseUncommittedSize computes the size of the proposed entries and
@@ -1945,7 +1649,7 @@ private:
     // entry at a new leader's term, as well as leaving a joint configuration.
     bool increaseUncommittedSize(EntrySlice ents)
     {
-        auto s = payloadsSize(ents);
+        auto s = payloadSize(ents);
         if (uncommittedSize_ > 0 && s > 0 && uncommittedSize_ + s > maxUncommittedSize_) {
             // If the uncommitted tail of the Raft log is empty, allow any size
             // proposal. Otherwise, limit the size of the uncommitted tail of the
@@ -1962,34 +1666,15 @@ private:
 
     // reduceUncommittedSize accounts for the newly committed entries by decreasing
     // the uncommitted entry size limit.
-    void reduceUncommittedSize(uint64_t s)
+    void reduceUncommittedSize(size_t size)
     {
-        if (s > uncommittedSize_) {
+        if (size > uncommittedSize_) {
             // uncommittedSize may underestimate the size of the uncommitted Raft
             // log tail but will never overestimate it. Saturate at 0 instead of
             // allowing overflow.
             uncommittedSize_ = 0;
         } else {
-            uncommittedSize_ -= s;
-        }
-    }
-
-    void handleReadIndex(const pb::Message& m)
-    {
-        // thinking: use an internally defined context instead of the user given context.
-        // We can express this in terms of the term and index instead of a user-supplied value.
-        // This would allow multiple reads to piggyback on the same message.
-        switch (readOnly_.option()) {
-        // If more than the local vote is needed, go through a full broadcast.
-        case ReadIndexSafe:
-            readOnly_.addRequest(log_.committed_, m);
-            // The local node automatically acks the request.
-            readOnly_.recvAck(id_, m.entries(0).data());
-            bcastHeartbeatWithCtx(m.entries(0).data());
-            break;
-        case ReadIndexLeaseBased:
-            handleReadIndexReady(m, log_.committed_);
-            break;
+            uncommittedSize_ -= size;
         }
     }
 
@@ -2009,7 +1694,7 @@ private:
         }
     }
 
-    void unreachable(uint64_t id)
+    void unreachable(NodeId id)
     {
         assert(state_ == Leader);
         auto pr = tracker_.getProgress(id);
@@ -2022,7 +1707,7 @@ private:
         }
     }
 
-    void snapshotStatus(uint64_t id, bool reject)
+    void snapshotStatus(NodeId id, bool reject)
     {
         assert(state_ == Leader);
         auto pr = tracker_.getProgress(id);
@@ -2043,7 +1728,7 @@ private:
         // If snapshot finish, wait for the MsgAppendResponse from the remote node before sending
         // out the next MsgAppend.
         // If snapshot failure, wait for a heartbeat interval before next try
-        pr->setMsgAppFlowPaused(true);
+        pr->pause();
     }
 
     void checkQuorum()
@@ -2056,93 +1741,197 @@ private:
 
         // Mark everyone (but ourselves) as inactive in preparation for the next
         // CheckQuorum.
-        tracker_.visit([this](uint64_t id, tracker::Progress& pr) {
+        tracker_.visit([this](NodeId id, tracker::Progress& pr) {
             if (id != id_) {
                 pr.setRecentActive(false);
             }
         });
     }
 
+    void handleHeartbeat(HeartbeatRequest& m)
+    {
+        log_.commitTo(m.commit);
+        send(HeartbeatResponse{
+          .to = m.from,
+          .context = m.context,
+        });
+        return;
+    }
+
+    void handleAppendEntries(AppendEntriesRequest& m)
+    {
+
+        if (m.prevLog.index < log_.committed_) {
+            send(AppendEntriesResponse{
+              .to = m.from,
+              .index = log_.committed_,
+              .reject = false,
+            });
+            return;
+        }
+
+        auto lastIndex = log_.maybeAppend(m.prevLog.index, m.prevLog.term, m.commit, m.entries);
+        if (lastIndex) {
+            send(AppendEntriesResponse{
+              .to = m.from,
+              .index = *lastIndex,
+              .reject = false,
+            });
+            return;
+        }
+
+        // Our log does not match the leader's at index m.index. Return a hint to the
+        // leader - a guess on the maximal (index, term) at which the logs match. Do
+        // this by searching through the follower's log for the maximum (index, term)
+        // pair with a term <= the MsgAppend's LogTerm and an index <= the MsgAppend's
+        // Index. This can help skip all indexes in the follower's uncommitted tail
+        // with terms greater than the MsgAppend's LogTerm.
+        //
+        // See the other caller for findConflictByTerm (in stepLeader) for a much more
+        // detailed explanation of this mechanism.
+
+        // NB: m.index >= raftLog.committed by now (see the early return above), and
+        // raftLog.lastIndex() >= raftLog.committed by invariant, so min of the two is
+        // also >= raftLog.committed. Hence, the findConflictByTerm argument is within
+        // the valid interval, which then will return a valid (index, term) pair with
+        // a non-zero term (unless the log is empty). However, it is safe to send a zero
+        // LogTerm in this response in any case, so we don't verify it here.
+        auto hint = log_.findConflictByTerm(std::min(m.prevLog.index, log_.lastIndex()), m.prevLog.term);
+
+        send(AppendEntriesResponse{
+          .to = m.from,
+          .index = m.prevLog.index,
+          .rejectHint = hint,
+          .reject = true,
+        });
+    }
+
+    void handleSnapshot(InstallSnapshotRequest& m)
+    {
+        // MsgSnapshot messages should always carry a non-nil Snapshot, but err on the
+        // side of safety and treat a nil Snapshot as a zero-valued Snapshot.
+        auto snapshot = std::make_shared<Snapshot>(m.snapshot);
+
+        auto sindex = snapshot->meta.index;
+        auto sterm = snapshot->meta.term;
+
+        InstallSnapshotResponse resp;
+        resp.to = m.from;
+
+        if (restore(snapshot)) {
+            logger_.info("{} [commit: {}] restored snapshot [index: {}, term: {}]", id_, log_.committed_, sindex,
+                         sterm);
+            resp.index = log_.lastIndex();
+        } else {
+            logger_.info("{} [commit: {}] ignored snapshot [index: {}, term: {}]", id_, log_.committed_, sindex, sterm);
+            resp.index = log_.committed_;
+        }
+        send(resp);
+    }
+
+    void handleReadIndex(ReadIndexRequest& m)
+    {
+        if (state_ != Leader) {
+            return;
+        }
+
+        if (tracker_.isSingleton()) {
+            handleReadIndexReady(m, log_.committed_);
+            return;
+        }
+
+        // Reject read only request when this leader has not committed any log entry
+        // in its term.
+        if (!committedEntryInCurrentTerm()) {
+            return;
+        }
+
+        // thinking: use an internally defined context instead of the user given context.
+        // We can express this in terms of the term and index instead of a user-supplied value.
+        // This would allow multiple reads to piggyback on the same message.
+        switch (readOnly_.option()) {
+        // If more than the local vote is needed, go through a full broadcast.
+        case ReadIndexSafe:
+            readOnly_.addRequest(log_.committed_, m);
+            // The local node automatically acks the request.
+            readOnly_.recvAck(id_, m.context);
+            bcastHeartbeatWithCtx(m.context);
+            break;
+        case ReadIndexLeaseBased:
+            handleReadIndexReady(m, log_.committed_);
+            break;
+        }
+    }
+
 private:
     friend class Node<T>;
 
-    Logger & logger_;
+    Logger& logger_;
 
-    uint64_t id_;
+    NodeId id_;
 
     Term term_;
-    uint64_t vote_;
 
-    std::vector<ReadState> readStates_;
+    NodeId vote_;
+
+    StateType state_;
 
     // the log
     Log<T> log_;
 
-    size_t maxMsgSize_;
-    size_t maxUncommittedSize_;
-
     tracker::ProgressTracker tracker_;
 
-    StateType state_;
+    std::vector<ReadState> readStates_;
 
     // isLearner is true if the local raft node is a learner.
     bool isLearner_;
 
     // msgs contains the list of messages that should be sent out immediately to
-    // other nodes.
-    //
-    // Messages in this list must target other nodes.
-    std::vector<pb::Message> msgs_;
-    // msgsAfterAppend contains the list of messages that should be sent after
-    // the accumulated unstable state (e.g. term, vote, []entry, and snapshot)
-    // has been persisted to durable storage. This includes waiting for any
-    // unstable state that is already in the process of being persisted (i.e.
-    // has already been handed out in a prior Ready struct) to complete.
-    //
-    // Messages in this list may target other nodes or may target this node.
-    //
-    // Messages in this list have the type MsgAppendResponse, MsgRequestVoteResponse, or
-    // MsgRequestPreVoteResponse. See the comment in raft.send for details.
-    std::vector<pb::Message> msgsAfterAppend_;
+    // other nodes.  Messages in this list must target other nodes.
+    std::vector<MessageHolder> msgs_;
+
+    ReadOnly readOnly_;
 
     // the leader id
-    uint64_t lead_;
+    NodeId lead_;
     // leadTransferee is id of the leader transfer target when its value is not zero.
     // Follow the procedure defined in raft thesis 3.10.
-    uint64_t leadTransferee_;
+    NodeId leadTransferee_;
     // Only one conf change may be pending (in the log, but not yet
     // applied) at a time. This is enforced via pendingConfIndex, which
     // is set to a value >= the log index of the latest pending
     // configuration change (if any). Config changes are only allowed to
     // be proposed if the leader's applied index is greater than this
     // value.
-    uint64_t pendingConfIndex_;
+    NodeId pendingConfIndex_;
     // disableConfChangeValidation is Config.DisableConfChangeValidation,
     // see there for details.
     bool disableConfChangeValidation_;
+
+    size_t maxMsgSize_;
+
+    size_t maxUncommittedSize_;
+
     // an estimate of the size of the uncommitted tail of the Raft log. Used to
     // prevent unbounded log growth. Only maintained by the leader. Reset on
     // term changes.
     size_t uncommittedSize_;
 
-    ReadIndexContext readOnly_;
-
     // number of ticks since it reached last electionTimeout when it is leader
     // or candidate.
     // number of ticks since it reached last electionTimeout or received a
     // valid message from current leader when it is a follower.
-
-    int electionElapsed_;
+    size_t electionElapsed_;
 
     // number of ticks since it reached last heartbeatTimeout.
     // only leader keeps heartbeatElapsed.
-    int heartbeatElapsed_;
+    size_t heartbeatElapsed_;
 
     bool checkQuorum_;
     bool preVote_;
 
-    int heartbeatTimeout_;
-    int electionTimeout_;
+    size_t heartbeatTimeout_;
+    size_t electionTimeout_;
 
     // randomizedElectionTimeout is a random number between
     // [electiontimeout, 2 * electiontimeout - 1]. It gets reset
@@ -2150,6 +1939,23 @@ private:
     int randomizedElectionTimeout_;
     bool disableProposalForwarding_;
     bool stepDownOnRemoval_;
+
+    RandomGenerator<size_t> rng_;
 };
 
 } // namespace raft
+
+template <>
+struct fmt::formatter<raft::StateType> : fmt::formatter<std::string_view>
+{
+    auto format(raft::StateType x, format_context& ctx) const -> decltype(ctx.out())
+    {
+        static const std::array<std::string, 4> stamp = {
+            "Follower",
+            "Candidate",
+            "Leader",
+            "PreCandidate",
+        };
+        return fmt::format_to(ctx.out(), "[{}]", stamp[x]);
+    }
+};

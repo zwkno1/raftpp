@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
-#include <tracker/inflights.h>
+#include <raftpp/raftpp.h>
 
 TEST(Infligths, Add)
 {
     // no rotating case
     auto in = raft::tracker::Inflights(10, 10000);
 
-    for (uint64_t i = 0; i < 5; i++) {
+    for (auto i = 0uz; i < 5; i++) {
         in.add(i, 100 + i);
     }
 

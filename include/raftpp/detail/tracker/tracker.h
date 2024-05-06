@@ -1,19 +1,12 @@
 #pragma once
 
-#include <array>
-#include <cstdint>
-#include <string>
+#include <optional>
 #include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
-#include <confchange/confchange.h>
-#include <quorum/joint.h>
-#include <quorum/quorum.h>
-#include <tracker/progress.h>
-#include <utils.h>
-
-#include <raftpb/raft.pb.h>
+#include <__concepts/invocable.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/quorum.h>
+#include <raftpp/detail/tracker/progress.h>
 
 namespace raft {
 namespace tracker {
@@ -50,7 +43,7 @@ public:
     // learner it can't be in either half of the joint config. This invariant
     // simplifies the implementation since it allows peers to have clarity about
     // its current role without taking into account joint consensus.
-    std::set<uint64_t> learners_;
+    std::set<NodeId> learners_;
     // When we turn a voter into a learner during a joint consensus transition,
     // we cannot add the learner directly when entering the joint state. This is
     // because this would violate the invariant that the intersection of
@@ -85,37 +78,11 @@ public:
     // also a voter in the joint config. In this case, the learner is added
     // right away when entering the joint configuration, so that it is caught up
     // as soon as possible.
-    std::set<uint64_t> learnersNext_;
+    std::set<NodeId> learnersNext_;
 };
 
-class MatchAckIndexer
-{
-public:
-    MatchAckIndexer(const std::map<uint64_t, ProgressPtr>& p)
-      : progress_(p)
-    {
-    }
-
-    // AckedIndex implements IndexLookuper.
-    std::optional<Index> ackedIndex(uint64_t id) const
-    {
-        auto iter = progress_.find(id);
-        if (iter == progress_.end()) {
-            return {};
-        }
-        return iter->second->match();
-    }
-
-private:
-    const std::map<uint64_t, ProgressPtr>& progress_;
-};
-
-struct VoteDetails
-{
-    size_t granted_ = 0;
-    size_t rejected_ = 0;
-    quorum::VoteResult result_ = quorum::VoteLost;
-};
+template <typename T>
+concept ProgressVisitor = std::invocable<T, NodeId, Progress&>;
 
 // ProgressTracker tracks the currently active configuration and the information
 // known about the nodes and learners in it. In particular, it tracks the match
@@ -129,38 +96,30 @@ public:
     {
     }
 
-    ProgressTracker(size_t maxInflight, size_t maxBytes, Config config, ProgressMap progress)
-      : maxInflight_(maxInflight)
-      , maxInflightBytes_(maxBytes)
-      , config_(std::move(config))
-      , progress_(std::move(progress))
-    {
-    }
-
     // ConfState returns a ConfState representing the active configuration.
-    pb::ConfState confState()
+    ConfState confState() const
     {
-        pb::ConfState cs;
+        ConfState cs;
 
-        auto copy = [](auto dst, const auto& src) {
-            dst->Reserve(src.size());
-            dst->Assign(src.begin(), src.end());
+        auto copy = [](auto& dst, const auto& src) {
+            dst.reserve(src.size());
+            dst = { src.begin(), src.end() };
         };
 
-        copy(cs.mutable_voters(), config_.voters_.incoming().ids());
-        copy(cs.mutable_voters_outgoing(), config_.voters_.outgoing().ids());
+        copy(cs.voters, config_.voters_.incoming().ids());
+        copy(cs.votersOutgoing, config_.voters_.outgoing().ids());
 
-        copy(cs.mutable_learners(), config_.learners_);
-        copy(cs.mutable_learners_next(), config_.learnersNext_);
+        copy(cs.learners, config_.learners_);
+        copy(cs.learnersNext, config_.learnersNext_);
 
-        cs.set_auto_leave(config_.autoLeave_);
+        cs.autoLeave = config_.autoLeave_;
 
         return cs;
     }
 
     const Config& config() const { return config_; }
 
-    ProgressPtr getProgress(uint64_t id)
+    ProgressPtr getProgress(NodeId id)
     {
         auto iter = progress_.find(id);
         if (iter == progress_.end()) {
@@ -169,9 +128,9 @@ public:
         return iter->second;
     }
 
-    bool contains(uint64_t id) const { return progress_.contains(id); }
+    bool contains(NodeId id) const { return progress_.contains(id); }
 
-    const std::unordered_map<uint64_t, bool>& votes() const { return votes_; }
+    const std::unordered_map<NodeId, bool>& votes() const { return votes_; }
 
     // IsSingleton returns true if (and only if) there is only one voting member
     // (i.e. the leader) in the current configuration.
@@ -184,15 +143,21 @@ public:
     // the voting members of the group have acknowledged.
     Index committedIndex() const
     {
-        MatchAckIndexer l{ progress_ };
-        return config_.voters_.committedIndex(l);
+        return config_.voters_.committedIndex([&](NodeId id) -> std::optional<Index> {
+            auto iter = progress_.find(id);
+            if (iter != progress_.end()) {
+                return iter->second->match();
+            }
+            return {};
+        });
     }
 
     // Visit invokes the supplied closure for all tracked progresses in stable order.
-    void visit(std::function<void(uint64_t, Progress&)> f)
+    template <ProgressVisitor T>
+    void visit(T&& func)
     {
         for (auto& [id, pr] : progress_) {
-            f(id, *pr);
+            func(id, *pr);
         }
     }
 
@@ -200,16 +165,13 @@ public:
     // raft state machine. Otherwise, it returns false.
     bool quorumActive()
     {
-        // votes := map[uint64]bool{}
-        std::unordered_map<uint64_t, bool> votes;
-        for (auto& [id, pr] : progress_) {
-            if (config_.learners_.contains(id)) {
-                continue;
+        return config_.voters_.voteResult([&](NodeId id) {
+            auto iter = progress_.find(id);
+            if (iter == progress_.end()) {
+                return quorum::VotePending;
             }
-            votes[id] = pr->recentActive();
-        }
-
-        return config_.voters_.voteResult(votes) == quorum::VoteWon;
+            return iter->second->recentActive() ? quorum::VoteWon : quorum::VoteLost;
+        }) == quorum::VoteWon;
     }
 
     // ResetVotes prepares for a new round of vote counting via recordVote.
@@ -217,40 +179,21 @@ public:
 
     // RecordVote records that the node with the given id voted for this Raft
     // instance if v == true (and declined it otherwise).
-    void recordVote(uint64_t id, bool v) { votes_.try_emplace(id, v); }
+    void recordVote(NodeId id, bool v) { votes_.try_emplace(id, v); }
 
-    // TallyVotes returns the number of granted and rejected Votes, and whether the
-    // election outcome is known.
-    VoteDetails tallyVotes()
+    // voteResult returns the election outcome.
+    quorum::VoteResult voteResult()
     {
-        // Make sure to populate granted/rejected correctly even if the Votes slice
-        // contains members no longer part of the configuration. This doesn't really
-        // matter in the way the numbers are used (they're informational), but might
-        // as well get it right.
-
-        VoteDetails details;
-
-        for (auto& [id, pr] : progress_) {
-            if (config_.learners_.contains(id)) {
-                continue;
-            }
-
+        return config_.voters_.voteResult([&](NodeId id) {
             auto iter = votes_.find(id);
             if (iter == votes_.end()) {
-                continue;
+                return quorum::VotePending;
             }
-            if (iter->second) {
-                details.granted_++;
-            } else {
-                details.rejected_++;
-            }
-        }
-
-        details.result_ = config_.voters_.voteResult(votes_);
-        return details;
+            return iter->second ? quorum::VoteWon : quorum::VoteLost;
+        });
     }
 
-    void update(Config config, ProgressMap progress)
+    void reset(Config config, ProgressMap progress)
     {
         config_ = std::move(config);
         progress_ = std::move(progress);
@@ -261,9 +204,9 @@ public:
         return std::make_shared<tracker::Progress>(lastIndex, maxInflight_, maxInflightBytes_, recentActive);
     }
 
-    ProgressMap progress() { return progress_; };
+    ProgressMap progress() const { return progress_; };
 
-    bool isLearner(uint64_t id) { return config_.learners_.contains(id); }
+    bool isLearner(NodeId id) const { return config_.learners_.contains(id); }
 
 private:
     size_t maxInflight_;
@@ -274,7 +217,7 @@ private:
 
     ProgressMap progress_;
 
-    std::unordered_map<uint64_t, bool> votes_;
+    std::unordered_map<NodeId, bool> votes_;
 };
 
 } // namespace tracker

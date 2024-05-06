@@ -4,14 +4,14 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
-#include <raft.h>
-#include <readindex.h>
-#include <result.h>
-#include <utils.h>
-
-#include <raftpb/raft.pb.h>
+#include <raftpp/detail/message.h>
+#include <raftpp/detail/raft.h>
+#include <raftpp/detail/readonly.h>
+#include <raftpp/detail/result.h>
+#include <raftpp/detail/utils.h>
 
 namespace raft {
 
@@ -24,7 +24,7 @@ struct Ready
 
     std::optional<SoftState> softState_;
 
-    std::optional<pb::HardState> hardState_;
+    std::optional<HardState> hardState_;
 
     std::vector<ReadState> readStates_;
 
@@ -34,40 +34,14 @@ struct Ready
 
     EntryList committedEntries_;
 
-    std::vector<pb::Message> msgs_;
-    std::vector<pb::Message> msgsAfterAppend_;
+    std::vector<MessageHolder> msgs_;
 
     bool mustSync_;
 };
 
-// struct ReadyRecord
-//{
-//     uint64_t number;
-//     std::optional<IndexTerm> lastEntry;
-//     std::optional<IndexTerm> snapshot;
-// };
-//
-// struct LightReady
-//{
-//     std::optional<Index> committedIndex;
-//     EntryList committedEntries;
-//     std::vector<pb::Message> messages;
-// };
-
-// ErrStepLocalMsg is returned when try to step a local raft message
-// var ErrStepLocalMsg = errors.New("raft: cannot step raft local message")
-
-// ErrStepPeerNotFound is returned when try to step a response message
-// but there is no peer found in raft.trk for that node.
-// var ErrStepPeerNotFound = errors.New("raft: cannot step as peer not found")
-
-// RawNode is a thread-unsafe Node.
-// The methods of this struct correspond to the methods of Node and are described
-// more fully there.
-
 struct Peer
 {
-    uint64_t id;
+    NodeId id;
     std::string context;
 };
 
@@ -93,12 +67,15 @@ public:
     void tick() { raft_.tick(); }
 
     // Step advances the state machine using the given message.
-    Result<> step(pb::Message& m)
+    template <Message Msg>
+    Result<> step(Msg& m)
     {
         // Ignore unexpected local messages receiving over network.
-        if (isResponseMsg(m.type()) && !raft_.tracker_.contains(m.from())) {
-            return ErrStepPeerNotFound;
-        }
+        // if constexpr( !std::is_same_v<Msg,  ProposalRequst>) {
+        //    if (!raft_.tracker_.contains(m.from)) {
+        //        return ErrStepPeerNotFound;
+        //    }
+        //}
         return raft_.step(m);
     }
 
@@ -106,27 +83,16 @@ public:
     Result<> campaign() { return raft_.hup(); }
 
     // Propose proposes data be appended to the raft log.
-    Result<> propose(std::string data)
-    {
-        pb::Message msg;
-        msg.set_type(pb::MsgPropose);
-        msg.set_from(raft_.id());
-        msg.add_entries()->set_data(std::move(data));
-        return raft_.step(msg);
-    }
+    Result<> propose(std::string data) { return raft_.propose(std::move(data)); }
 
     // ProposeConfChange proposes a config change. See (Node).ProposeConfChange for
     // details.
-    Result<> proposeConfChange(pb::ConfChange cc)
-    {
-        auto msg = confChangeToMsg(cc);
-        return raft_.step(msg);
-    }
+    Result<> proposeConfChange(const ConfChange& cc) { return raft_.proposeConfChange(cc); }
 
     // ApplyConfChange applies a config change to the local node. The app must call
     // this when it applies a configuration change, except when it decides to reject
     // the configuration change, in which case no call must take place.
-    pb::ConfState applyConfChange(pb::ConfChange cc) { return raft_.applyConfChange(cc); }
+    ConfState applyConfChange(const ConfChange& cc) { return raft_.applyConfChange(cc); }
 
     // Ready returns the outstanding work that the application needs to handle. This
     // includes appending and applying entries or a snapshot, updating the HardState,
@@ -150,12 +116,6 @@ public:
         rd.entries_ = log.nextUnstableEntries();
         rd.committedEntries_ = log.nextCommittedEntries(true);
         rd.msgs_ = std::move(raft_.msgs_);
-        rd.msgsAfterAppend_ = std::move(raft_.msgsAfterAppend_);
-        for (auto& msg : rd.msgsAfterAppend_) {
-            if (msg.to() != raft_.id()) {
-                rd.msgs_.push_back(msg);
-            }
-        }
 
         auto ss = raft_.softState();
         if (ss != prevSoftState_) {
@@ -174,13 +134,12 @@ public:
         }
 
         rd.readStates_ = raft_.readStates_;
-        rd.mustSync_ =
-          (hs.term() != prevHardState_.term() || hs.vote() != prevHardState_.vote() || !rd.entries_.empty());
+        rd.mustSync_ = (hs.term != prevHardState_.term || hs.vote != prevHardState_.vote || !rd.entries_.empty());
 
         log.acceptUnstable();
         if (!rd.committedEntries_.empty()) {
-            auto index = rd.committedEntries_.back().index();
-            log.acceptApplying(index, entsSize(rd.committedEntries_), true);
+            auto index = rd.committedEntries_.back().index;
+            log.acceptApplying(index, payloadSize(rd.committedEntries_), true);
         }
 
         return ready_;
@@ -196,18 +155,22 @@ public:
 
         auto& rd = *ready_;
 
-        for (auto& msg : rd.msgsAfterAppend_) {
-            if (msg.to() == raft_.id()) {
-                raft_.step(msg);
-            }
-        }
+        // for (auto& msg : rd.msgs_) {
+        //     std::visit(
+        //       [&](auto&& m) {
+        //           if (m.to == raft_.id()) {
+        //               raft_.step(m);
+        //           }
+        //       },
+        //       msg);
+        // }
 
         if (log.hasNextOrInProgressUnstableEnts()) {
             log.stableEntries(log.lastIndex(), log.lastTerm());
         }
 
         if (rd.snapshot_) {
-            raft_.appliedSnapshot(rd.snapshot_->metadata().index());
+            raft_.appliedSnapshot(rd.snapshot_->meta.index);
         }
 
         if (!rd.entries_.empty() || rd.snapshot_) {
@@ -217,14 +180,14 @@ public:
             log.stableEntries(index, term);
 
             if (rd.snapshot_) {
-                raft_.appliedSnapshot(rd.snapshot_->metadata().index());
+                raft_.appliedSnapshot(rd.snapshot_->meta.index);
             }
         }
 
         if (!rd.committedEntries_.empty()) {
-            auto index = rd.committedEntries_.back().index();
-            raft_.appliedTo(index, entsSize(rd.committedEntries_));
-            raft_.reduceUncommittedSize(payloadsSize(rd.committedEntries_));
+            auto index = rd.committedEntries_.back().index;
+            raft_.appliedTo(index, payloadSize(rd.committedEntries_));
+            raft_.reduceUncommittedSize(payloadSize(rd.committedEntries_));
         }
 
         ready_ = nullptr;
@@ -248,19 +211,20 @@ public:
 
         raft_.becomeFollower(1, 0);
 
-        google::protobuf::RepeatedPtrField<raft::pb::Entry> entries;
+        EntryList entries;
         for (size_t i = 0; i < peers.size(); i++) {
             auto& peer = peers[i];
-            pb::ConfChange cc;
-            auto cs = cc.add_changes();
-            cs->set_type(pb::AddNode);
-            cs->set_node_id(peer.id);
-            pb::Entry e;
-            e.set_type(pb::EntryConfChange);
-            e.set_term(1);
-            e.set_index(i + 1);
-            e.set_data(cc.SerializeAsString());
-            entries.Add(std::move(e));
+            ConfChange cc;
+            cc.changes = { {
+              .type = AddNode,
+              .nodeId = peer.id,
+            } };
+            entries.push_back({
+              .type = EntryConfChange,
+              .term = 1,
+              .index = i + 1,
+              .data = cc.serialize(),
+            });
         }
         raft_.log_.append(EntrySlice{ entries });
 
@@ -278,26 +242,28 @@ public:
         // the invariant that committed < unstable?
         raft_.log_.committed_ = entries.size();
         for (auto& peer : peers) {
-            pb::ConfChange cc;
-            auto cs = cc.add_changes();
-            cs->set_type(pb::AddNode);
-            cs->set_node_id(peer.id);
+            ConfChange cc;
+            cc.changes.push_back({
+              .type = AddNode,
+              .nodeId = peer.id,
+            });
 
             raft_.applyConfChange(cc);
         }
     }
 
-    uint64_t leaderId() { return prevSoftState_.leaderId_; }
+    NodeId leaderId() const { return raft_.lead_; }
+    NodeId id() const { return raft_.id(); }
 
 private:
-    bool mustSync(pb::HardState st, pb::HardState prevst, int entsnum)
+    bool mustSync(HardState st, HardState prevst, int entsnum)
     {
         // Persistent state on all servers:
         // (Updated on stable storage before responding to RPCs)
         // currentTerm
         // votedFor
         // log entries[]
-        return (entsnum != 0 || st.vote() != prevst.vote() || st.term() != prevst.term());
+        return (entsnum != 0 || st.vote != prevst.vote || st.term != prevst.term);
     }
 
     bool hasReady()
@@ -320,10 +286,6 @@ private:
             return true;
         }
 
-        if (!raft_.msgsAfterAppend_.empty()) {
-            return true;
-        }
-
         if (log.hasNextUnstableSnapshot()) {
             return true;
         }
@@ -338,7 +300,7 @@ private:
     Raft<T> raft_;
 
     SoftState prevSoftState_;
-    pb::HardState prevHardState_;
+    HardState prevHardState_;
     std::shared_ptr<Ready> ready_;
 };
 
