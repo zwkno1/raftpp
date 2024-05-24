@@ -8,7 +8,7 @@
 using namespace raft;
 using namespace raft::quorum;
 
-RandomGenerator<uint64_t> rng;
+RandomGenerator<uint64_t> rng{ 0, 1ull << 63 };
 
 void BenchmarkMajorityConfigCommittedIndex(benchmark::State& state)
 {
