@@ -1,5 +1,13 @@
 ## Raft
-A C++ implementation of the raft algorithm.
+Raft is a protocol with which a cluster of nodes can maintain a replicated state machine. 
+
+
+This raft implementation is a full feature C++ implementation of Raft protocol. Features includes:
+
+* Leader election
+* Log replication
+* Log compaction
+* Membership changes
 
 ## Links for further research
 * [Raft site](https://raft.github.io/)
