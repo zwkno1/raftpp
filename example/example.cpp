@@ -2,7 +2,6 @@
 
 #include <iostream>
 #include <list>
-#include <print>
 
 #include <raftpp/raftpp.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -282,9 +281,10 @@ int main(int argc, char* argv[])
         if (op == "s") {
             auto printStat = [&](int id) {
                 auto stat = mailBox.stat(id);
-                std::println("[{}] term: {}, commit: {}, vote: {}, lead: {}, state: {}", id, stat.hardState_.term,
-                             stat.hardState_.commit, stat.hardState_.vote, stat.softState_.lead_,
-                             stat.softState_.state_);
+                std::cout << std::format("[{}] term: {}, commit: {}, vote: {}, lead: {}, state: {}", id,
+                                         stat.hardState_.term, stat.hardState_.commit, stat.hardState_.vote,
+                                         stat.softState_.lead_, stat.softState_.state_)
+                          << std::endl;
             };
 
             for (auto i : std::views::iota(1ul, nodes.size() + 1)) {
@@ -301,7 +301,7 @@ int main(int argc, char* argv[])
 
         auto id = atoi(cmd[0].c_str());
         if (id <= 0 || id > nodes.size()) {
-            std::println("bad idx");
+            std::cout << "bad idx" << std::endl;
             continue;
         }
         auto n = nodes[id - 1];
@@ -310,7 +310,7 @@ int main(int argc, char* argv[])
             if (cmd.size() != 3) {
                 continue;
             }
-            std::println(">> {}", n->get(cmd[2]));
+            std::cout << ">> " << n->get(cmd[2]) << std::endl;
         } else if (op == "set" || op == "del") {
             // raft::ProposalRequst msg;
             string s;

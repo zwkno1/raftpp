@@ -210,8 +210,8 @@ public:
             } };
             entries.push_back({
               .type = EntryConfChange,
-              .term = 1,
               .index = i + 1,
+              .term = 1,
               .data = cc.serialize(),
             });
         }

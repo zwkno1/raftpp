@@ -333,8 +333,8 @@ public:
     {
         return {
             .term = term_,
-            .vote = vote_,
             .commit = log_.committed_,
+            .vote = vote_,
         };
     }
 
@@ -504,8 +504,8 @@ public:
             // same in the case of regular votes, but different for pre-votes.
             send(VoteResponse{
               .to = m.from,
-              .term = m.term,
               .pre = m.pre,
+              .term = m.term,
               .reject = !granted,
             });
 
@@ -686,8 +686,9 @@ private:
         // NB: pr has been updated, but we make sure to only use its old values below.
         send(AppendEntriesRequest{
           .to = to,
-          .prevLog.index = lastIndex,
-          .prevLog.term = *lastTerm,
+          .prevLog = {.index = lastIndex,
+          .term = *lastTerm,
+	  },
           .entries = std::move(*entries),
           .commit = log_.committed_,
         });
@@ -1037,8 +1038,8 @@ private:
                 // has been written to stable storage.
                 send(VoteResponse{
                   .to = id,
-                  .term = term,
                   .pre = (t == CampaignPreElection),
+                  .term = term,
                   .reject = false,
                 });
                 return;
@@ -1714,7 +1715,7 @@ private:
         if (reject) {
             // NB: the order here matters or we'll be probing erroneously from
             // the snapshot index, but the snapshot never applied.
-            pr.pendingSnapshot_ = 0;
+            pr->pendingSnapshot_ = 0;
         }
         pr->becomeProbe();
 
@@ -1794,8 +1795,8 @@ private:
         send(AppendEntriesResponse{
           .to = m.from,
           .index = m.prevLog.index,
-          .rejectHint = hint,
           .reject = true,
+          .rejectHint = hint,
         });
     }
 

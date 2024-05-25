@@ -161,7 +161,7 @@ public:
         } else {
             panic("unstable out of bound");
         }
-        entries_.append_range(ents);
+        entries_.insert(entries_.end(), ents.begin(), ents.end());
     }
 
     // slice returns the entries from the unstable log with indexes in the range

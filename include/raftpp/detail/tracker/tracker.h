@@ -3,7 +3,6 @@
 #include <optional>
 #include <unordered_map>
 
-#include <__concepts/invocable.h>
 #include <raftpp/detail/message.h>
 #include <raftpp/detail/quorum.h>
 #include <raftpp/detail/tracker/progress.h>
