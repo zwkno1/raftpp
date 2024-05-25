@@ -1,11 +1,9 @@
 #pragma once
-#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 #include <raftpp/detail/error.h>
 #include <raftpp/detail/message.h>
-#include <raftpp/detail/utils.h>
 
 namespace raft {
 namespace tracker {

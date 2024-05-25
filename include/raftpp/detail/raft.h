@@ -2,29 +2,22 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <cstddef>
-#include <limits>
 #include <memory>
-#include <random>
 #include <ranges>
 #include <string>
 #include <string_view>
-#include <type_traits>
-#include <typeinfo>
 #include <vector>
 
 #include <raftpp/detail/confchange.h>
-#include <raftpp/detail/error.h>
 #include <raftpp/detail/log.h>
 #include <raftpp/detail/message.h>
 #include <raftpp/detail/quorum.h>
 #include <raftpp/detail/readonly.h>
 #include <raftpp/detail/result.h>
 #include <raftpp/detail/storage.h>
-#include <raftpp/detail/tracker/progress.h>
 #include <raftpp/detail/tracker/tracker.h>
 #include <raftpp/detail/utils.h>
+#include <spdlog/spdlog.h>
 
 namespace raft {
 
@@ -904,9 +897,9 @@ private:
             panic("invalid transition [leader -> pre-candidate]");
         }
         logger_.info("transition [ {} -> {} ], term {}", state_, PreCandidate, term_);
-        // Becoming a pre-candidate changes our step functions and state,
-        // but doesn't change anything else. In particular it does not increase
-        // term_ or change vote_.
+        //  Becoming a pre-candidate changes our step functions and state,
+        //  but doesn't change anything else. In particular it does not increase
+        //  term_ or change vote_.
         tracker_.resetVotes();
         lead_ = InvalidId;
         state_ = PreCandidate;
@@ -1945,17 +1938,18 @@ private:
 
 } // namespace raft
 
-template <>
-struct fmt::formatter<raft::StateType> : fmt::formatter<std::string_view>
+template <typename CharT>
+struct std::formatter<raft::StateType, CharT> : std::formatter<string_view, CharT>
 {
-    auto format(raft::StateType x, format_context& ctx) const -> decltype(ctx.out())
+    template <class FormatContext>
+    auto format(raft::StateType s, FormatContext& ctx) const
     {
-        static const std::array<std::string, 4> stamp = {
-            "Follower",
-            "Candidate",
-            "Leader",
-            "PreCandidate",
-        };
-        return fmt::format_to(ctx.out(), "[{}]", stamp[x]);
+        static const std::array<std::string_view, 5> stamp = { "Follower", "Candidate", "Leader", "PreCandidate",
+                                                               "InvalidState" };
+
+        if (s > raft::NumStates) {
+            s = raft::NumStates;
+        }
+        return std::format_to(ctx.out(), "[{}]", stamp[s]);
     }
 };

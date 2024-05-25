@@ -1,11 +1,9 @@
 #pragma once
 
 #include <exception>
-#include <stdexcept>
+#include <format>
 #include <string>
-#include <type_traits>
 
-#include <spdlog/spdlog.h>
 namespace raft {
 
 enum ErrorCode : uint32_t
@@ -50,12 +48,12 @@ public:
     }
 
     template <typename... Args>
-    inline static Error fmt(fmt::format_string<Args...> fmt, Args&&... args)
+    inline static Error fmt(std::format_string<Args...> fmt, Args&&... args)
     {
-        return Error{ fmt::format(fmt, std::forward<Args>(args)...) };
+        return Error{ std::format(fmt, std::forward<Args>(args)...) };
     }
 
-    const char* what() const noexcept { return what_.c_str(); }
+    const char* what() const noexcept override { return what_.c_str(); }
 
 private:
     std::string what_;
@@ -81,7 +79,7 @@ template <typename T>
 }
 
 template <typename... Args>
-[[noreturn]] inline void panic(fmt::format_string<Args...> fmt, Args&&... args)
+[[noreturn]] inline void panic(std::format_string<Args...> fmt, Args&&... args)
 {
     throw Error::fmt(fmt, std::forward<Args>(args)...);
 }

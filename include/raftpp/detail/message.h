@@ -3,16 +3,13 @@
 #include <algorithm>
 #include <bit>
 #include <concepts>
-#include <cstddef>
+#include <format>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <variant>
 #include <vector>
-
-#include <spdlog/fmt/bundled/format.h>
 
 namespace raft {
 
@@ -458,10 +455,11 @@ concept Message = one_of_variant<std::remove_reference_t<T>, MessageHolder>::val
 
 } // namespace raft
 
-template <>
-struct fmt::formatter<raft::CampaignType> : fmt::formatter<std::string_view>
+template <typename CharT>
+struct std::formatter<raft::CampaignType, CharT> : std::formatter<string_view, CharT>
 {
-    inline auto format(raft::CampaignType t, format_context& ctx) const -> decltype(ctx.out())
+    template <class FormatContext>
+    auto format(raft::CampaignType t, FormatContext& ctx) const
     {
         static const std::array<std::string_view, 4> names = {
             "CampaignPreElection",
@@ -474,6 +472,6 @@ struct fmt::formatter<raft::CampaignType> : fmt::formatter<std::string_view>
             t = raft::CampaignTypeInvalid;
         }
 
-        return fmt::format_to(ctx.out(), "{}", names[t]);
+        return std::format_to(ctx.out(), "{}", names[t]);
     }
 };

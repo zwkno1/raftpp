@@ -6,7 +6,6 @@
 
 #include <raftpp/detail/message.h>
 #include <raftpp/detail/tracker/inflights.h>
-#include <raftpp/detail/utils.h>
 
 namespace raft {
 namespace tracker {
@@ -293,7 +292,7 @@ using ProgressMap = std::map<NodeId, ProgressPtr>;
 } // namespace raft
 
 template <>
-struct fmt::formatter<raft::tracker::StateType> : fmt::formatter<std::string_view>
+struct std::formatter<raft::tracker::StateType> : std::formatter<std::string_view>
 {
     inline auto format(raft::tracker::StateType st, format_context& ctx) const
     {
@@ -302,6 +301,6 @@ struct fmt::formatter<raft::tracker::StateType> : fmt::formatter<std::string_vie
             "StateReplicate",
             "StateSnapshot",
         };
-        return fmt::format_to(ctx.out(), "{}", names[st]);
+        return std::format_to(ctx.out(), "{}", names[st]);
     }
 };

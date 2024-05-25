@@ -1,14 +1,9 @@
 #include <algorithm>
-#include <cstddef>
-#include <iterator>
 #include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include <raftpp/raftpp.h>
-
-#include "raftpp/detail/message.h"
-#include "raftpp/detail/utils.h"
 
 std::mt19937 rng(std::random_device{}());
 
@@ -119,7 +114,7 @@ void check(raft::ConfState& cs)
 
     tracker.reset(res->config_, res->progress_);
 
-    // fmt::println("{}", res->config_.voters_);
+    // std::println("{}", res->config_.voters_);
 
     EXPECT_TRUE(res.has_value()) << res.error().what();
 

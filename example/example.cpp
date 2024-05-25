@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <list>
+#include <print>
 
 #include <raftpp/raftpp.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -142,7 +143,6 @@ void run(NodeContext& nc)
 
         auto msgs = mailBox.recv(nc.id_);
         for (auto& msg : msgs) {
-            // nc.logger_->info(msg.ShortDebugString());
             std::visit([&](auto&& msg) { nc.node_.step(msg); }, msg);
         }
 
@@ -225,9 +225,9 @@ int main(int argc, char* argv[])
 
     vector<NodeContext*> nodes;
     for (size_t i : std::views::iota(0, n)) {
-        auto logger = spdlog::basic_logger_mt(fmt::format("{}", i + 1), fmt::format("example.{}.log", i + 1));
+        auto logger = spdlog::basic_logger_mt(std::format("{}", i + 1), std::format("example.{}.log", i + 1));
         // logger->flush_on(spdlog::level::info);
-        // auto logger = spdlog::stdout_logger_mt(fmt::format("{}", i + 1));
+        // auto logger = spdlog::stdout_logger_mt(std::format("{}", i + 1));
         // if (i == 0)
         logger->set_level(spdlog::level::trace);
         raft::Config c{ *logger };
@@ -282,7 +282,7 @@ int main(int argc, char* argv[])
         if (op == "s") {
             auto printStat = [&](int id) {
                 auto stat = mailBox.stat(id);
-                fmt::println("[{}] term: {}, commit: {}, vote: {}, lead: {}, state: {}", id, stat.hardState_.term,
+                std::println("[{}] term: {}, commit: {}, vote: {}, lead: {}, state: {}", id, stat.hardState_.term,
                              stat.hardState_.commit, stat.hardState_.vote, stat.softState_.lead_,
                              stat.softState_.state_);
             };
@@ -301,7 +301,7 @@ int main(int argc, char* argv[])
 
         auto id = atoi(cmd[0].c_str());
         if (id <= 0 || id > nodes.size()) {
-            fmt::println("bad idx");
+            std::println("bad idx");
             continue;
         }
         auto n = nodes[id - 1];
@@ -310,7 +310,7 @@ int main(int argc, char* argv[])
             if (cmd.size() != 3) {
                 continue;
             }
-            fmt::println(">> {}", n->get(cmd[2]));
+            std::println(">> {}", n->get(cmd[2]));
         } else if (op == "set" || op == "del") {
             // raft::ProposalRequst msg;
             string s;

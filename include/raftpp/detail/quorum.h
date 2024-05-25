@@ -1,11 +1,11 @@
 #pragma once
 
+#include <format>
 #include <optional>
 #include <set>
 #include <unordered_map>
 
 #include <raftpp/detail/message.h>
-#include <spdlog/fmt/bundled/format.h>
 
 namespace raft {
 namespace quorum {
@@ -206,13 +206,13 @@ public:
 private:
     // IDs returns a newly initialized map representing the set of voters present
     // in the joint configuration.
-    std::set<NodeId> ids() const
-    {
-        std::set<NodeId> ids;
-        std::set_union(incoming_.ids().begin(), incoming_.ids().end(), outgoing_.ids().begin(), outgoing_.ids().end(),
-                       std::inserter(ids, ids.begin()));
-        return ids;
-    }
+    // std::set<NodeId> ids() const
+    //{
+    //    std::set<NodeId> ids;
+    //    std::set_union(incoming_.ids().begin(), incoming_.ids().end(), outgoing_.ids().begin(), outgoing_.ids().end(),
+    //                   std::inserter(ids, ids.begin()));
+    //    return ids;
+    //}
 
     MajorityConfig incoming_;
     MajorityConfig outgoing_;
@@ -221,23 +221,26 @@ private:
 } // namespace quorum
 } // namespace raft
 
-template <>
-struct fmt::formatter<raft::quorum::MajorityConfig> : fmt::formatter<std::string_view>
+template <typename CharT>
+struct std::formatter<raft::quorum::MajorityConfig, CharT> : std::formatter<string_view, CharT>
 {
-    inline auto format(const raft::quorum::MajorityConfig& m, format_context& ctx) const
+    template <class FormatContext>
+    auto format(const raft::quorum::MajorityConfig& m, FormatContext& ctx) const
     {
-        return fmt::format_to(ctx.out(), "({})", fmt::join(m.ids(), ","));
+        return std::format_to(ctx.out(), "{}", m.ids());
     }
 };
 
-template <>
-struct fmt::formatter<raft::quorum::JointConfig> : fmt::formatter<std::string_view>
+template <typename CharT>
+struct std::formatter<raft::quorum::JointConfig, CharT> : std::formatter<string_view, CharT>
 {
-    inline auto format(const raft::quorum::JointConfig& joint, format_context& ctx) const
+    template <class FormatContext>
+    auto format(const raft::quorum::JointConfig& joint, FormatContext& ctx) const
     {
+
         if (joint.outgoing().empty()) {
-            return fmt::format_to(ctx.out(), "[{}]", joint.incoming());
+            return std::format_to(ctx.out(), "{}", joint.incoming());
         }
-        return fmt::format_to(ctx.out(), "[{},{}]", joint.incoming(), joint.outgoing());
+        return std::format_to(ctx.out(), "[{},{}]", joint.incoming(), joint.outgoing());
     }
 };

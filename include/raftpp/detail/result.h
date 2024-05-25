@@ -1,11 +1,9 @@
 #pragma once
 
-#include <memory>
 #include <optional>
 #include <variant>
 
 #include <raftpp/detail/error.h>
-#include <raftpp/detail/utils.h>
 namespace raft {
 
 template <typename T = void, typename Err = ErrorCode>

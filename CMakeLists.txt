@@ -16,6 +16,7 @@ include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
 # spdlog
+set(SPDLOG_USE_STD_FORMAT ON)
 FetchContent_Declare(
   spdlog
   GIT_REPOSITORY https://github.com/gabime/spdlog.git

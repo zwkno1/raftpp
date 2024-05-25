@@ -1,14 +1,11 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <string>
 #include <unordered_set>
 
 #include <raftpp/detail/message.h>
-#include <raftpp/detail/utils.h>
 
 namespace raft {
 

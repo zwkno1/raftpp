@@ -1,15 +1,11 @@
 #pragma once
 
-#include <cstddef>
-#include <limits>
+#include <functional>
 #include <memory>
-#include <utility>
 
-#include <raftpp/detail/error.h>
 #include <raftpp/detail/message.h>
 #include <raftpp/detail/result.h>
 #include <raftpp/detail/storage.h>
-#include <raftpp/detail/utils.h>
 
 namespace raft {
 
