@@ -200,16 +200,17 @@ private:
     // uint64s, i.e. len( (l - r) \union (r - l)).
     size_t symdiff(const quorum::MajorityConfig& l, const quorum::MajorityConfig& r)
     {
-        struct
-        {
-            using value_type = NodeId;
-            inline void push_back(NodeId) { ++n; }
+        auto diff = [](auto& x, auto& y) {
             size_t n = 0;
-        } counter;
-        std::set_symmetric_difference(l.ids().begin(), l.ids().end(), r.ids().begin(), r.ids().end(),
-                                      std::back_inserter(counter));
+            for (auto& i : x.ids()) {
+                if (!y.ids().contains(i)) {
+                    ++n;
+                }
+            }
+            return n;
+        };
 
-        return counter.n;
+        return diff(l, r) + diff(r, l);
     }
 
     // checkAndCopy copies the tracker's config and progress map (deeply enough for

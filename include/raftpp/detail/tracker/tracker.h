@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <optional>
+#include <ranges>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <raftpp/detail/message.h>
 #include <raftpp/detail/quorum.h>
@@ -42,7 +45,7 @@ public:
     // learner it can't be in either half of the joint config. This invariant
     // simplifies the implementation since it allows peers to have clarity about
     // its current role without taking into account joint consensus.
-    std::set<NodeId> learners_;
+    std::unordered_set<NodeId> learners_;
     // When we turn a voter into a learner during a joint consensus transition,
     // we cannot add the learner directly when entering the joint state. This is
     // because this would violate the invariant that the intersection of
@@ -77,7 +80,7 @@ public:
     // also a voter in the joint config. In this case, the learner is added
     // right away when entering the joint configuration, so that it is caught up
     // as soon as possible.
-    std::set<NodeId> learnersNext_;
+    std::unordered_set<NodeId> learnersNext_;
 };
 
 template <typename T>
@@ -100,16 +103,11 @@ public:
     {
         ConfState cs;
 
-        auto copy = [](auto& dst, const auto& src) {
-            dst.reserve(src.size());
-            dst = { src.begin(), src.end() };
-        };
+        cs.voters = config_.voters_.incoming().ids();
+        cs.votersOutgoing = config_.voters_.outgoing().ids();
 
-        copy(cs.voters, config_.voters_.incoming().ids());
-        copy(cs.votersOutgoing, config_.voters_.outgoing().ids());
-
-        copy(cs.learners, config_.learners_);
-        copy(cs.learnersNext, config_.learnersNext_);
+        cs.learners = config_.learners_;
+        cs.learnersNext = config_.learnersNext_;
 
         cs.autoLeave = config_.autoLeave_;
 

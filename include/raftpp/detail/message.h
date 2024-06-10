@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -66,20 +67,20 @@ struct ConfState
 {
     // The voters in the incoming config. (If the configuration is not joint,
     // then the outgoing config is empty).
-    std::vector<NodeId> voters;
+    std::unordered_set<NodeId> voters;
     // The learners in the incoming config.
-    std::vector<NodeId> learners;
+    std::unordered_set<NodeId> learners;
     // The voters in the outgoing config.
-    std::vector<NodeId> votersOutgoing;
+    std::unordered_set<NodeId> votersOutgoing;
     // The nodes that will become learners when the outgoing config is removed.
     // These nodes are necessarily currently in nodes_joint (or they would have
     // been added to the incoming config right away).
-    std::vector<NodeId> learnersNext;
+    std::unordered_set<NodeId> learnersNext;
     // If set, the config is joint and Raft will automatically transition into
     // the final config (i.e. remove the outgoing config) when this is safe.
     bool autoLeave = false;
 
-    auto operator<=>(const ConfState&) const = default;
+    bool operator==(const ConfState&) const = default;
 };
 
 struct HardState

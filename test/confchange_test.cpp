@@ -32,25 +32,24 @@ raft::ConfState generate()
     }
     std::shuffle(ids.begin(), ids.end(), rng);
     for (auto i = 0; i < nVoters; ++i) {
-        cs.voters.push_back(ids[i]);
+        cs.voters.insert(ids[i]);
     }
-    ids.erase(ids.begin(), ids.begin() + nVoters);
+    // ids.erase(ids.begin(), ids.begin() + nVoters);
 
     for (auto i = 0; i < nLearners; ++i) {
-        cs.learners.push_back(ids[i]);
+        cs.learners.insert(ids[nVoters + i]);
     }
-    ids.erase(ids.begin(), ids.begin() + nLearners);
+    // ids.erase(ids.begin(), ids.begin() + nLearners);
 
     // Roll the dice on how many of the incoming voters we decide were also
     // previously voters.
     //
-    // NB: this code avoids creating non-nil empty slices (here and below).
     auto nOutgoingRetainedVoters = rng() % (nVoters + 1);
     for (auto i = 0; i < nOutgoingRetainedVoters; ++i) {
-        cs.votersOutgoing.push_back(cs.voters[i]);
+        cs.votersOutgoing.insert(ids[i]);
     }
     for (auto i = 0; i < nRemovedVoters; ++i) {
-        cs.votersOutgoing.push_back(ids[i]);
+        cs.votersOutgoing.insert(ids[nVoters + nLearners + i]);
     }
 
     // Only outgoing voters that are not also incoming voters can be in
@@ -58,7 +57,7 @@ raft::ConfState generate()
     if (nRemovedVoters > 0) {
         auto nLearnersNext = rng() % (nRemovedVoters + 1);
         for (auto i = 0; i < nLearnersNext; ++i) {
-            cs.learnersNext.push_back(ids[i]);
+            cs.learnersNext.insert(ids[nVoters + nLearners + i]);
         }
     }
     cs.autoLeave = ((!cs.votersOutgoing.empty()) && (rng() % 2 == 1));
@@ -71,17 +70,7 @@ bool equal(const raft::ConfState& l, const raft::ConfState& r)
         return false;
     }
 
-    auto eq = [](const auto& x, const auto& y) {
-        if (x.size() != y.size()) {
-            return false;
-        }
-        for (int i = 0; i < x.size(); ++i) {
-            if (x[i] != y[i]) {
-                return false;
-            }
-        }
-        return true;
-    };
+    auto eq = [](const auto& x, const auto& y) { return x == y; };
 
     if (!eq(l.voters, r.voters)) {
         return false;
@@ -104,17 +93,16 @@ bool equal(const raft::ConfState& l, const raft::ConfState& r)
 
 void check(raft::ConfState& cs)
 {
-    std::ranges::sort(cs.voters);
-    std::ranges::sort(cs.votersOutgoing);
-    std::ranges::sort(cs.learners);
-    std::ranges::sort(cs.learnersNext);
+    // std::ranges::sort(cs.voters);
+    // std::ranges::sort(cs.votersOutgoing);
+    // std::ranges::sort(cs.learners);
+    // std::ranges::sort(cs.learnersNext);
 
     tracker::ProgressTracker tracker(20, 0);
     auto res = confchange::restore(cs, tracker, 20);
+    EXPECT_TRUE(res.has_value()) << res.error().what();
 
     tracker.reset(res->config_, res->progress_);
-
-    // std::println("{}", res->config_.voters_);
 
     EXPECT_TRUE(res.has_value()) << res.error().what();
 

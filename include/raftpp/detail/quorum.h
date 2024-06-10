@@ -2,8 +2,8 @@
 
 #include <format>
 #include <optional>
-#include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <raftpp/detail/message.h>
 
@@ -52,10 +52,7 @@ private:
 class MajorityConfig
 {
 public:
-    MajorityConfig(std::set<NodeId> ids = {})
-      : ids_(std::move(ids))
-    {
-    }
+    MajorityConfig() = default;
 
     // CommittedIndex computes the committed index from those supplied via the
     // provided AckedIndexer (for the active config).
@@ -143,21 +140,19 @@ public:
 
     inline void clear() { ids_.clear(); }
 
-    inline const std::set<NodeId>& ids() const { return ids_; }
+    inline const std::unordered_set<NodeId>& ids() const { return ids_; }
 
     inline bool contains(NodeId id) const { return ids_.contains(id); }
 
     inline bool empty() const { return ids_.empty(); }
 
 private:
-    std::set<NodeId> ids_;
+    std::unordered_set<NodeId> ids_;
 };
 
 class JointConfig
 {
 public:
-    bool empty() const { return incoming_.empty() && outgoing_.empty(); }
-
     // CommittedIndex returns the largest committed index for the given joint
     // quorum. An index is jointly committed if it is committed in both constituent
     // majorities.
@@ -191,17 +186,19 @@ public:
         return VotePending;
     }
 
-    MajorityConfig& incoming() { return incoming_; }
+    inline MajorityConfig& incoming() { return incoming_; }
 
-    const MajorityConfig& incoming() const { return incoming_; }
+    inline const MajorityConfig& incoming() const { return incoming_; }
 
-    MajorityConfig& outgoing() { return outgoing_; }
+    inline MajorityConfig& outgoing() { return outgoing_; }
 
-    const MajorityConfig& outgoing() const { return outgoing_; }
+    inline const MajorityConfig& outgoing() const { return outgoing_; }
 
-    bool isJoint() const { return !outgoing_.empty(); }
+    inline bool isJoint() const { return !outgoing_.empty(); }
 
     inline bool contains(NodeId id) const { return incoming_.contains(id) || outgoing_.contains(id); }
+
+    inline bool empty() const { return incoming_.empty() && outgoing_.empty(); }
 
 private:
     // IDs returns a newly initialized map representing the set of voters present
