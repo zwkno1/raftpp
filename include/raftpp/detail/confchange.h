@@ -78,7 +78,7 @@ struct Changer
     Result<ChangerResult, Error> enterJoint(bool autoLeave, std::span<const ConfChangeItem> css)
     {
         auto res = checkAndCopy();
-        if (res.has_error()) {
+        if (!res) {
             return res;
         }
         auto& cfg = res->config_;
@@ -98,13 +98,13 @@ struct Changer
         cfg.voters_.outgoing() = cfg.voters_.incoming();
 
         auto ok = apply(cfg, progress, css);
-        if (ok.has_error()) {
+        if (!ok) {
             return ok.error();
         }
 
         cfg.autoLeave_ = autoLeave;
         ok = checkInvariants(cfg, progress);
-        if (ok.has_error()) {
+        if (!ok) {
             return ok.error();
         }
 
@@ -119,7 +119,7 @@ struct Changer
     Result<ChangerResult, Error> simple(std::span<const ConfChangeItem> ccs)
     {
         auto res = checkAndCopy();
-        if (res.has_error()) {
+        if (!res) {
             return res;
         }
         auto& cfg = res->config_;
@@ -130,7 +130,7 @@ struct Changer
         }
 
         auto ok = apply(cfg, trk, ccs);
-        if (ok.has_error()) {
+        if (!ok) {
             return ok.error();
         }
 
@@ -139,7 +139,7 @@ struct Changer
         }
 
         ok = checkInvariants(cfg, trk);
-        if (ok.has_error()) {
+        if (!ok) {
             return ok.error();
         }
         return res;
@@ -162,7 +162,7 @@ struct Changer
     Result<ChangerResult, Error> leaveJoint()
     {
         auto res = checkAndCopy();
-        if (res.has_error()) {
+        if (!res) {
             return res;
         }
         auto& cfg = res->config_;
@@ -189,7 +189,7 @@ struct Changer
         cfg.autoLeave_ = false;
 
         auto err = checkInvariants(cfg, prs);
-        if (err.has_error()) {
+        if (!err) {
             return err.error();
         }
         return res;
@@ -222,7 +222,7 @@ private:
         tracker::ProgressMap prs = prs_;
 
         auto res = checkInvariants(cfg, prs);
-        if (res.has_error()) {
+        if (!res) {
             return res.error();
         }
         return ChangerResult{ cfg, prs };
@@ -527,7 +527,7 @@ Result<ChangerResult, Error> restore(const ConfState& cs, tracker::ProgressTrack
         for (auto& cs : incoming) {
             std::span<ConfChangeItem> s{ &cs, 1 };
             auto res = chg.simple(s);
-            if (res.has_error()) {
+            if (!res) {
                 return res.error();
             }
             chg.config_ = std::move(res->config_);
@@ -542,7 +542,7 @@ Result<ChangerResult, Error> restore(const ConfState& cs, tracker::ProgressTrack
         for (auto& cs : outgoing) {
             std::span<ConfChangeItem> s{ &cs, 1 };
             auto res = chg.simple(s);
-            if (res.has_error()) {
+            if (!res) {
                 return res.error();
             }
             chg.config_ = std::move(res->config_);
@@ -555,7 +555,7 @@ Result<ChangerResult, Error> restore(const ConfState& cs, tracker::ProgressTrack
         // would be removing 2,3,4 and then adding in 1,2,3 while transitioning
         // into a joint state.
         auto res = chg.enterJoint(cs.autoLeave, incoming);
-        if (res.has_error()) {
+        if (!res) {
             return res.error();
         }
         chg.config_ = std::move(res->config_);

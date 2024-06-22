@@ -318,12 +318,12 @@ public:
         // which may need to access stable Storage. If we find the entry's term in
         // the unstable log, we know it was in the valid range.
         auto t = unstable_.term(idx);
-        if (t.has_value()) {
+        if (t) {
             return *t;
         }
 
         auto st = storage_.term(idx);
-        if (st.has_value()) {
+        if (st) {
             return *st;
         }
 
@@ -364,7 +364,7 @@ public:
     bool matchTerm(Index idx, Term t) const
     {
         auto currentTerm = term(idx);
-        return currentTerm.has_value() && *currentTerm == t;
+        return currentTerm && *currentTerm == t;
     }
 
     // maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
@@ -575,13 +575,13 @@ public:
     {
         for (; lo < hi;) {
             auto entries = slice(lo, hi, pageSize);
-            if (entries.has_error()) {
+            if (!entries) {
                 return entries.error();
             } else if (entries->empty()) {
                 return ErrLogScanEmpty;
             }
             auto res = f(*entries);
-            if (res.has_error()) {
+            if (!res) {
                 return res.error();
             }
             lo += entries->size();
@@ -680,7 +680,7 @@ private:
         auto cut = std::min(hi, unstable_.offset());
         auto entries = storage_.entries(lo, cut, maxSize);
 
-        if (entries.has_error()) {
+        if (!entries) {
             if (entries.error() == ErrCompacted) {
                 return entries;
             }

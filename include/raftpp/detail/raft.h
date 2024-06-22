@@ -645,17 +645,18 @@ private:
             entries = log_.entries(nexIndex, maxMsgSize_);
         }
 
-        if ((entries.has_error() || entries->empty()) && !sendIfEmpty) {
+        if ((!entries || entries->empty()) && !sendIfEmpty) {
             return false;
         }
 
-        if (lastTerm.has_error() || entries.has_error()) { // send snapshot if we failed to get term or entries
+        // send snapshot if we failed to get term or entries
+        if (!lastTerm || !entries) {
             if (!pr->recentActive()) {
                 return false;
             }
 
             auto snap = log_.snapshot();
-            if (snap.has_error()) {
+            if (!snap) {
                 if (snap.error() == ErrSnapshotTemporarilyUnavailable) {
                     return false;
                 }
@@ -1000,7 +1001,7 @@ private:
             return {};
         });
 
-        if (res.has_error() && res.error() == ErrLogScanBreak) {
+        if (!res && res.error() == ErrLogScanBreak) {
             return true;
         }
         res.unwrap();

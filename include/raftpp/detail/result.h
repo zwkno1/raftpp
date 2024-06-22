@@ -1,184 +1,70 @@
 #pragma once
 
-#include <optional>
-#include <variant>
+#include <expected>
 
 #include <raftpp/detail/error.h>
 namespace raft {
 
 template <typename T = void, typename Err = ErrorCode>
-class Result
+class Result : public std::expected<T, Err>
 {
 public:
     template <typename... Args>
     Result(Args&&... args)
-      : value_(std::forward<Args>(args)...)
+      : std::expected<T, Err>(std::forward<Args>(args)...)
     {
     }
 
     Result(Err e)
-      : value_(std::move(e))
+      : std::expected<T, Err>(std::unexpected(e))
     {
-    }
-
-    // inline operator bool() const { return has_value(); }
-
-    inline T& operator*() { return std::get<T>(value_); }
-
-    inline const T& operator*() const { return std::get<T>(value_); }
-
-    inline T* operator->() { return std::addressof(std::get<T>(value_)); }
-
-    inline const T* operator->() const { return std::addressof(std::get<T>(value_)); }
-
-    inline Err& error() { return std::get<Err>(value_); }
-
-    inline const Err& error() const { return std::get<Err>(value_); }
-
-    inline T& value() & { return std::get<T>(value_); }
-
-    inline const T& value() const& { return std::get<T>(value_); }
-
-    inline T&& value() && { return std::move(std::get<T>(value_)); }
-
-    inline bool has_value() const { return std::holds_alternative<T>(value_); }
-
-    inline bool has_error() const { return !has_value(); }
-
-    inline T value_or(T&& v)
-    {
-        if (has_value()) {
-            return value();
-        }
-        return v;
-    }
-
-    inline T& unwrap() &
-    {
-        if (has_error()) {
-            panic(error());
-        }
-        return value();
-    }
-
-    inline const T& unwrap() const&
-    {
-        if (has_error()) {
-            panic(error());
-        }
-        return value();
-    }
-
-    inline T&& unwrap() &&
-    {
-
-        if (has_error()) {
-            panic(error());
-        }
-        return std::move(value());
-    }
-
-private:
-    std::variant<T, Err> value_;
-};
-
-template <typename Err>
-class Result<void, Err>
-{
-public:
-    Result() {}
-
-    Result(Err e)
-      : value_(std::move(e))
-    {
-    }
-
-    // inline operator bool() const { return !value_.has_value(); }
-
-    inline const Err& error() const { return *value_; }
-
-    inline Err& error() { return *value_; }
-
-    inline bool has_value() const { return !value_.has_value(); }
-
-    inline bool has_error() const { return !has_value(); }
-
-    void unwrap() const
-    {
-        if (has_error()) {
-            panic(error());
-        }
-    }
-
-private:
-    std::optional<Err> value_;
-};
-
-template <typename T>
-class Result<T, void>
-{
-public:
-    Result() {}
-
-    Result(T t)
-      : value_(std::move(t))
-    {
-    }
-
-    // inline operator bool() const { return value_.has_value(); }
-
-    inline T& operator*() { return value_.value(); }
-
-    inline const T& operator*() const { return value_.value(); }
-
-    inline T* operator->() { return std::addressof(std::get<T>(value_)); }
-
-    inline const T* operator->() const { return std::addressof(std::get<T>(value_)); }
-
-    inline bool has_value() const { return value_.has_value(); }
-
-    inline bool has_error() const { return !has_value(); }
-
-    inline T& value() & { return std::get<T>(value_); }
-
-    inline const T& value() const& { return std::get<T>(value_); }
-
-    inline T&& value() && { return std::move(std::get<T>(value_)); }
-
-    T& unwrap() &
-    {
-        if (has_error()) {
-            panic();
-        }
-        return value();
     }
 
     const T& unwrap() const&
     {
-        if (has_error()) {
-            panic();
+        if (!this->has_value()) {
+            throw this->error();
         }
-        return value();
+        return this->value();
+    }
+
+    T& unwrap() &
+    {
+        if (!this->has_value()) {
+            throw this->error();
+        }
+        return this->value();
     }
 
     T&& unwrap() &&
     {
-        if (has_error()) {
-            panic();
+        if (!this->has_value()) {
+            throw this->error();
         }
-        return std::move(value());
+        return std::move(this->value());
     }
+};
 
-    inline T value_or(T&& v)
+template <typename Err>
+class Result<void, Err> : public std::expected<void, Err>
+{
+public:
+    Result()
+      : std::expected<void, Err>()
     {
-        if (has_value()) {
-            return value();
-        }
-        return v;
     }
 
-private:
-    std::optional<T> value_;
+    Result(Err e)
+      : std::expected<void, Err>(std::unexpected(e))
+    {
+    }
+
+    void unwrap() const
+    {
+        if (!this->has_value()) {
+            throw this->error();
+        }
+    }
 };
 
 } // namespace raft
